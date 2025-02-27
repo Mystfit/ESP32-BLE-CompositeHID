@@ -277,7 +277,7 @@ void BleCompositeHID::taskServer(void *pvParameter)
 
     // Start BLE advertisement
     NimBLEAdvertising *pAdvertising = pServer->getAdvertising();
-    pAdvertising->setAppearance(GENERIC_HID);
+    pAdvertising->setAppearance(HID_GAMEPAD);
     pAdvertising->addServiceUUID(BleCompositeHIDInstance->_hid->getHidService()->getUUID());
     pAdvertising->start();
     ESP_LOGD(LOG_TAG, "Advertising started!");
