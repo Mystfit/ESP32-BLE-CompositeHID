@@ -185,7 +185,23 @@ void KeyboardDevice::keyRelease(uint8_t keyCode)
         sendKeyReport();
     }
 }
+void KeyboardDevice::setKeyReport(KeyboardInputReport *InputReport)
+{
+    memcpy(&_inputReport, InputReport, sizeof(_inputReport));
+    if (_config.getAutoReport())
+    {
+        sendKeyReport();
+     }
+}
 
+void KeyboardDevice::setMediaKeyReport(KeyboardMediaInputReport *MediaInputReport)
+{
+    memcpy( &_mediaKeyInputReport,MediaInputReport, sizeof(_mediaKeyInputReport));
+    if (_config.getAutoReport())
+    {
+        sendMediaKeyReport();
+    }
+}
 void KeyboardDevice::sendKeyReport(bool defer)
 {
     if(defer || _config.getAutoDefer()){
