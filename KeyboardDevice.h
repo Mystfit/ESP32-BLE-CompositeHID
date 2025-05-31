@@ -9,8 +9,8 @@
 #include <mutex>
 
 struct KeyboardInputReport {
-    uint8_t modifiers;
-    uint8_t reserved;
+    uint8_t modifiers = 0x00;
+    uint8_t reserved = 0x00;
     uint8_t keys[6]; // 8 bits per key * 101 keys = 6 bytes
 };
 
@@ -41,10 +41,10 @@ class KeyboardCallbacks : public NimBLECharacteristicCallbacks {
 public:
     KeyboardCallbacks(KeyboardDevice* device);
 
-    void onWrite(NimBLECharacteristic* pCharacteristic) override;
-    void onRead(NimBLECharacteristic* pCharacteristic) override;
-    void onNotify(NimBLECharacteristic* pCharacteristic) override;
-    void onStatus(NimBLECharacteristic* pCharacteristic, Status status, int code) override;
+    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
+    void onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
+    void onStatus(NimBLECharacteristic* pCharacteristic, int code) override;
+    void onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue) override;
 
 private:
     KeyboardDevice* _device;

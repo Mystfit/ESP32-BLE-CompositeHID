@@ -1,10 +1,12 @@
 #include "BLEHostConfiguration.h"
+#include "NimBLEHIDDevice.h"
 
 BLEHostConfiguration::BLEHostConfiguration() :
     _vidSource(0x01),
     _vid(0xe502),
     _pid(0xbbab),
     _guidVersion(0x0110),
+    _hid_type(GENERIC_HID),
     _modelNumber("1.0.0"),
     _softwareRevision("1.0.0"),
     _serialNumber("0123456789"),
@@ -20,6 +22,7 @@ uint16_t BLEHostConfiguration::getVidSource(){ return _vidSource; }
 uint16_t BLEHostConfiguration::getVid(){ return _vid; }
 uint16_t BLEHostConfiguration::getPid(){ return _pid; }
 uint16_t BLEHostConfiguration::getGuidVersion(){ return _guidVersion; }
+uint16_t BLEHostConfiguration::getHidType(){ return _hid_type; }
 
 const char* BLEHostConfiguration::getModelNumber(){ return _modelNumber.c_str(); }
 const char* BLEHostConfiguration::getSoftwareRevision(){ return _softwareRevision.c_str(); }
@@ -32,6 +35,7 @@ void BLEHostConfiguration::setVidSource(uint8_t value) { _vidSource = value; }
 void BLEHostConfiguration::setVid(uint16_t value) { _vid = value; }
 void BLEHostConfiguration::setPid(uint16_t value) { _pid = value; }
 void BLEHostConfiguration::setGuidVersion(uint16_t value) { _guidVersion = value; }
+void BLEHostConfiguration::setHidType(uint16_t value) { _hid_type = value; }
 
 void BLEHostConfiguration::setModelNumber(const char *value) { _modelNumber = std::string(value); }
 void BLEHostConfiguration::setSoftwareRevision(const char *value) { _softwareRevision = std::string(value); }

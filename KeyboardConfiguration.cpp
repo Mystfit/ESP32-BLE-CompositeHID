@@ -1,6 +1,7 @@
 #include "KeyboardConfiguration.h"
 #include "KeyboardDevice.h"
 #include "KeyboardDescriptors.h"
+#include "HIDTypes.h"
 
 KeyboardConfiguration::KeyboardConfiguration() :
     BaseCompositeDeviceConfiguration(KEYBOARD_REPORT_ID),

@@ -14,7 +14,7 @@ XboxGamepadCallbacks::XboxGamepadCallbacks(XboxGamepadDevice* device) : _device(
 {
 }
 
-void XboxGamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristic)
+void XboxGamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo)
 {    
     // An example packet we might receive from XInput might look like 0x0300002500ff00ff
     XboxGamepadOutputReportData vibrationData = pCharacteristic->getValue<uint64_t>();
@@ -32,19 +32,19 @@ void XboxGamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristic)
     _device->onVibrate.fire(vibrationData);
 }
 
-void XboxGamepadCallbacks::onRead(NimBLECharacteristic* pCharacteristic)
+void XboxGamepadCallbacks::onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo)
 {
     ESP_LOGD(LOG_TAG, "XboxGamepadCallbacks::onRead");
 }
 
-void XboxGamepadCallbacks::onNotify(NimBLECharacteristic* pCharacteristic)
+void XboxGamepadCallbacks::onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue)
 {
-    ESP_LOGD(LOG_TAG, "XboxGamepadCallbacks::onNotify");
+    ESP_LOGD(LOG_TAG, "XboxGamepadCallbacks::onSubscribe");
 }
 
-void XboxGamepadCallbacks::onStatus(NimBLECharacteristic* pCharacteristic, Status status, int code)
+void XboxGamepadCallbacks::onStatus(NimBLECharacteristic* pCharacteristic, int code)
 {
-    ESP_LOGD(LOG_TAG, "XboxGamepadCallbacks::onStatus, status: %d, code: %d", status, code);
+    ESP_LOGD(LOG_TAG, "XboxGamepadCallbacks::onStatus, code: %d", code);
 }
 
 XboxGamepadDevice::XboxGamepadDevice() :
@@ -74,11 +74,11 @@ XboxGamepadDevice::~XboxGamepadDevice() {
 
 void XboxGamepadDevice::init(NimBLEHIDDevice* hid) {
     /// Create input characteristic to send events to the computer
-    auto input = hid->inputReport(XBOX_INPUT_REPORT_ID);
-    //_extra_input = hid->inputReport(XBOX_EXTRA_INPUT_REPORT_ID);
+    auto input = hid->getInputReport(XBOX_INPUT_REPORT_ID);
+    //_extra_input = hid->getInputReport(XBOX_EXTRA_INPUT_REPORT_ID);
 
     // Create output characteristic to handle events coming from the computer
-    auto output = hid->outputReport(XBOX_OUTPUT_REPORT_ID);
+    auto output = hid->getOutputReport(XBOX_OUTPUT_REPORT_ID);
     _callbacks = new XboxGamepadCallbacks(this);
     output->setCallbacks(_callbacks);
 
@@ -93,6 +93,11 @@ const BaseCompositeDeviceConfiguration& XboxGamepadDevice::getDeviceConfig() con
 void XboxGamepadDevice::resetInputs() {
     std::lock_guard<std::mutex> lock(_mutex);
     memset(&_inputReport, 0, sizeof(XboxGamepadInputReportData));
+
+    _inputReport.x = XBOX_AXIS_CENTER_OFFSET;
+    _inputReport.y = XBOX_AXIS_CENTER_OFFSET;
+    _inputReport.z = XBOX_AXIS_CENTER_OFFSET;
+    _inputReport.rz = XBOX_AXIS_CENTER_OFFSET;
 }
 
 void XboxGamepadDevice::pressButton(XboxButtons button) {
@@ -157,8 +162,8 @@ void XboxGamepadDevice::setLeftThumbstick(int16_t x, int16_t y) {
     if(_inputReport.x != x || _inputReport.y != y){
         {
             std::lock_guard<std::mutex> lock(_mutex);
-            _inputReport.x = (uint16_t)(x + 0x8000);
-            _inputReport.y = (uint16_t)(y + 0x8000);
+            _inputReport.x = (uint16_t)(x + XBOX_AXIS_CENTER_OFFSET);
+            _inputReport.y = (uint16_t)(y + XBOX_AXIS_CENTER_OFFSET);
         }
 
         if (_config->getAutoReport())
@@ -175,8 +180,8 @@ void XboxGamepadDevice::setRightThumbstick(int16_t z, int16_t rZ) {
     if(_inputReport.z != z || _inputReport.rz != rZ){
         {
             std::lock_guard<std::mutex> lock(_mutex);
-            _inputReport.z = (uint16_t)(z + 0x8000);
-            _inputReport.rz = (uint16_t)(rZ+ 0x8000);
+            _inputReport.z = (uint16_t)(z + XBOX_AXIS_CENTER_OFFSET);
+            _inputReport.rz = (uint16_t)(rZ+ XBOX_AXIS_CENTER_OFFSET);
         }
 
         if (_config->getAutoReport())

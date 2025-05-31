@@ -1,5 +1,6 @@
 #include "XboxGamepadConfiguration.h"
 #include "XboxGamepadDevice.h"
+#include "NimBLEHIDDevice.h"
 
 #if defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -19,6 +20,9 @@ XboxGamepadDeviceConfiguration::XboxGamepadDeviceConfiguration(uint8_t reportId)
 BLEHostConfiguration XboxOneSControllerDeviceConfiguration::getIdealHostConfiguration() const {
     // Fake a xbox controller
     BLEHostConfiguration config;
+
+    // Explicitly set HID Device type
+    config.setHidType(HID_GAMEPAD);
 
     // Vendor: Microsoft
     config.setVidSource(VENDOR_USB_SOURCE);
@@ -76,6 +80,9 @@ size_t XboxOneSControllerDeviceConfiguration::makeDeviceReport(uint8_t* buffer, 
 BLEHostConfiguration XboxSeriesXControllerDeviceConfiguration::getIdealHostConfiguration() const {
     // Fake a xbox controller
     BLEHostConfiguration config;
+
+    // Explicitly set HID Device type
+    config.setHidType(HID_GAMEPAD);
 
     // Vendor: Microsoft
     config.setVidSource(VENDOR_USB_SOURCE);

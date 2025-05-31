@@ -4,9 +4,10 @@
 
 #include <stdint.h>
 
-#define VENDOR_BLUETOOTH_SOURCE 0x01
-#define VENDOR_USB_SOURCE 0x02
 #define XBOX_VENDOR_ID 0x045E
+
+// Product: Xbox Wireless controller
+#define XBOX_1708_ALT_PRODUCT_ID 0x02e0 
 
 // Product: Xbox One S controller (supports linux kernel < 6.5)
 // Menu/select button replaces share button

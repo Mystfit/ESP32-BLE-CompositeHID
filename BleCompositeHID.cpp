@@ -1,13 +1,19 @@
+#include <NimBLEDevice.h>
+#include <NimBLEUtils.h>
+#include <NimBLEServer.h>
+#include "NimBLEHIDDevice.h"
+#include "HIDTypes.h"
+#include "HIDKeyboardTypes.h"
+#include <driver/adc.h>
+#include "sdkconfig.h"
+
 #include "BleCompositeHID.h"
 #include "BleConnectionStatus.h"
 
 #include <sstream>
 #include <iostream>
 #include <iomanip>
-#include <NimBLEDevice.h>
-#include <NimBLEUtils.h>
-#include <NimBLEServer.h>
-#include <NimBLEHIDDevice.h>
+
 
 #if defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -30,6 +36,7 @@ uint16_t vidSource;
 uint16_t vid;
 uint16_t pid;
 uint16_t guidVersion;
+uint16_t hidType;
 std::string modelNumber;
 std::string softwareRevision;
 std::string serialNumber;
@@ -54,7 +61,7 @@ BleCompositeHID::BleCompositeHID(std::string deviceName, std::string deviceManuf
     this->deviceName = deviceName.substr(0, CONFIG_BT_NIMBLE_GAP_DEVICE_NAME_MAX_LEN - 1);
     this->deviceManufacturer = deviceManufacturer;
     this->batteryLevel = batteryLevel;
-    this->_connectionStatus = new BleConnectionStatus();
+    this->_connectionStatus = new BleConnectionStatus();   
 }
 
 BleCompositeHID::~BleCompositeHID()
@@ -82,7 +89,10 @@ void BleCompositeHID::begin(const BLEHostConfiguration& config)
 	vid = _configuration.getVid();
 	pid = _configuration.getPid();
 	guidVersion = _configuration.getGuidVersion();
+    hidType = _configuration.getHidType();
 
+#ifndef PNPVersionField
+    // Legacy behaviour for versions of Nimble <= 1.4.1
 	uint8_t high = highByte(vid);
 	uint8_t low = lowByte(vid);
 
@@ -96,6 +106,7 @@ void BleCompositeHID::begin(const BLEHostConfiguration& config)
 	high = highByte(guidVersion);
 	low = lowByte(guidVersion);
 	guidVersion = low << 8 | high;
+#endif
     
     // Start BLE server
     xTaskCreate(this->taskServer, "server", 20000, (void *)this, 5, NULL);
@@ -129,7 +140,7 @@ void BleCompositeHID::addDevice(BaseCompositeDevice& device)
 
 bool BleCompositeHID::isConnected()
 {
-    return this->_connectionStatus->connected;
+    return this->_connectionStatus->isConnected();
 }
 
 void BleCompositeHID::setBatteryLevel(uint8_t level)
@@ -137,12 +148,7 @@ void BleCompositeHID::setBatteryLevel(uint8_t level)
     this->batteryLevel = level;
     if (this->_hid)
     {
-        this->_hid->setBatteryLevel(this->batteryLevel);
-
-        if (this->isConnected())
-        {
-            this->_hid->batteryLevel()->notify();
-        }
+        this->_hid->setBatteryLevel(this->batteryLevel,this->isConnected()?true:false);
 		
         // if (this->_configuration.getAutoReport())
         // {
@@ -215,10 +221,10 @@ void BleCompositeHID::taskServer(void *pvParameter)
     // Set the report map
     uint8_t customHidReportDescriptor[hidReportDescriptorSize];
     memcpy(&customHidReportDescriptor, tempHidReportDescriptor, hidReportDescriptorSize);
-    BleCompositeHIDInstance->_hid->reportMap(&customHidReportDescriptor[0], hidReportDescriptorSize);
+    BleCompositeHIDInstance->_hid->setReportMap(&customHidReportDescriptor[0], hidReportDescriptorSize);
 
     // Set manufacturer info
-    BleCompositeHIDInstance->_hid->manufacturer()->setValue(BleCompositeHIDInstance->deviceManufacturer);
+    BleCompositeHIDInstance->_hid->setManufacturer(BleCompositeHIDInstance->deviceManufacturer);
 
     // Create device UUID
     NimBLEService *pService = pServer->getServiceByUUID(SERVICE_UUID_DEVICE_INFORMATION);
@@ -261,10 +267,11 @@ void BleCompositeHID::taskServer(void *pvParameter)
     // pCharacteristic_Hardware_Revision->setValue();
 
     // Set PnP IDs
-    BleCompositeHIDInstance->_hid->pnp(vidSource, vid, pid, guidVersion);
-    BleCompositeHIDInstance->_hid->hidInfo(0x00, 0x01);
+    BleCompositeHIDInstance->_hid->setPnp(vidSource, vid, pid, guidVersion);
+    BleCompositeHIDInstance->_hid->setHidInfo(0x00, 0x01);
 
-    NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND);  //BLE_SM_PAIR_AUTHREQ_SC
+    // NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND);  //BLE_SM_PAIR_AUTHREQ_SC
+	NimBLEDevice::setSecurityAuth(true, false, false); // enable bonding, no MITM, no SC
 
     // Start BLE server
     BleCompositeHIDInstance->_hid->startServices();
@@ -272,8 +279,8 @@ void BleCompositeHID::taskServer(void *pvParameter)
 
     // Start BLE advertisement
     NimBLEAdvertising *pAdvertising = pServer->getAdvertising();
-    pAdvertising->setAppearance(GENERIC_HID);
-    pAdvertising->addServiceUUID(BleCompositeHIDInstance->_hid->hidService()->getUUID());
+    pAdvertising->setAppearance(hidType);
+    pAdvertising->addServiceUUID(BleCompositeHIDInstance->_hid->getHidService()->getUUID());
     pAdvertising->start();
     ESP_LOGD(LOG_TAG, "Advertising started!");
 

@@ -16,10 +16,10 @@ class GamepadCallbacks : public NimBLECharacteristicCallbacks
 public:
     GamepadCallbacks(GamepadDevice* device);
 
-    void onWrite(NimBLECharacteristic* pCharacteristic) override;
-    void onRead(NimBLECharacteristic* pCharacteristic) override;
-    void onNotify(NimBLECharacteristic* pCharacteristic) override;
-    void onStatus(NimBLECharacteristic* pCharacteristic, Status status, int code) override;
+    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
+    void onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
+    void onStatus(NimBLECharacteristic* pCharacteristic, int code) override;
+    void onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue) override;
 
 private:
     GamepadDevice* _device;
@@ -118,6 +118,10 @@ public:
     void resetButtons();
 
     void sendGamepadReport(bool defer = false);
+
+    // callbacks
+    Signal<uint8_t> onPlayerIndicatorChanged;
+
 private:
     void sendGamepadReportImp();
 
@@ -125,8 +129,7 @@ private:
     // Output properties
     uint8_t getPlayerIndicator();
 
-    // callbacks
-    Signal<uint8_t> onPlayerIndicatorChanged;
+
 
 
 private:
@@ -138,22 +141,22 @@ private:
     // Threaded access
     std::mutex _mutex;
 
-    NimBLECharacteristic* _setEffectCharacteristic;
-    NimBLECharacteristic* _setEnvelopeCharacteristic;
-    NimBLECharacteristic* _setConditionCharacteristic;
-    NimBLECharacteristic* _setPeriodicCharacteristic;
-    NimBLECharacteristic* _setConstantCharacteristic;
-    NimBLECharacteristic* _setRampCharacteristic;
-    NimBLECharacteristic* _setCustomForceCharacteristic;
-    NimBLECharacteristic* _downloadForceCharacteristic;
-    NimBLECharacteristic* _effectOperationCharacteristic;
-    NimBLECharacteristic* _pidDeviceControlCharacteristic;
-    NimBLECharacteristic* _deviceGainCharacteristic;
-    NimBLECharacteristic* _customForceCharacteristic;
-    NimBLECharacteristic* _pidState;
-    NimBLECharacteristic* _createNewEffect;
-    NimBLECharacteristic* _pidBlockLoad;
-    NimBLECharacteristic* _pidPool;
+    // NimBLECharacteristic* _setEffectCharacteristic;
+    // NimBLECharacteristic* _setEnvelopeCharacteristic;
+    // NimBLECharacteristic* _setConditionCharacteristic;
+    // NimBLECharacteristic* _setPeriodicCharacteristic;
+    // NimBLECharacteristic* _setConstantCharacteristic;
+    // NimBLECharacteristic* _setRampCharacteristic;
+    // NimBLECharacteristic* _setCustomForceCharacteristic;
+    // NimBLECharacteristic* _downloadForceCharacteristic;
+    // NimBLECharacteristic* _effectOperationCharacteristic;
+    // NimBLECharacteristic* _pidDeviceControlCharacteristic;
+    // NimBLECharacteristic* _deviceGainCharacteristic;
+    // NimBLECharacteristic* _customForceCharacteristic;
+    // NimBLECharacteristic* _pidState;
+    // NimBLECharacteristic* _createNewEffect;
+    // NimBLECharacteristic* _pidBlockLoad;
+    // NimBLECharacteristic* _pidPool;
 };
 
 #endif

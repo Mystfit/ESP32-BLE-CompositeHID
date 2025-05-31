@@ -15,24 +15,22 @@ KeyboardCallbacks::KeyboardCallbacks(KeyboardDevice* device) :
 {
 }
 
-void KeyboardCallbacks::onWrite(NimBLECharacteristic* pCharacteristic)
+void KeyboardCallbacks::onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo)
 {
-    // An example packet we might receive from XInput might look like 0x0300002500ff00ff
     KeyboardOutputReport ledReport = pCharacteristic->getValue<uint8_t>();
     ESP_LOGD(LOG_TAG, "KeyboardDevice::onWrite - LED Report: %d", ledReport);
-
     _device->onLED.fire(ledReport);
 }
 
-void KeyboardCallbacks::onRead(NimBLECharacteristic* pCharacteristic)
+void KeyboardCallbacks::onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo)
 {
 }
 
-void KeyboardCallbacks::onNotify(NimBLECharacteristic* pCharacteristic)
+void KeyboardCallbacks::onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue)
 {
 }
 
-void KeyboardCallbacks::onStatus(NimBLECharacteristic* pCharacteristic, Status status, int code)
+void KeyboardCallbacks::onStatus(NimBLECharacteristic* pCharacteristic, int code)
 {
 }
 
@@ -63,9 +61,9 @@ KeyboardDevice::~KeyboardDevice()
 
 void KeyboardDevice::init(NimBLEHIDDevice* hid)
 {
-    _input = hid->inputReport(_config.getReportId());
-    _mediaInput = hid->inputReport(MEDIA_KEYS_REPORT_ID);
-    _output = hid->outputReport(_config.getReportId());
+    _input = hid->getInputReport(_config.getReportId());
+    _mediaInput = hid->getInputReport(MEDIA_KEYS_REPORT_ID);
+    _output = hid->getOutputReport(_config.getReportId());
     _callbacks = new KeyboardCallbacks(this);
     _output->setCallbacks(_callbacks);
 
@@ -80,8 +78,11 @@ const BaseCompositeDeviceConfiguration& KeyboardDevice::getDeviceConfig() const
 void KeyboardDevice::resetKeys()
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    memset(&_inputReport, KEY_NONE, sizeof(_inputReport));
+    _inputReport.modifiers = 0x00;
+    _inputReport.reserved = 0x00;
+    memset(&_inputReport.keys, KEY_NONE, sizeof(_inputReport.keys));
     _mediaKeyInputReport.keys = 0x000000;
+
 }
 
 void KeyboardDevice::modifierKeyPress(uint8_t modifier)

@@ -1,4 +1,5 @@
 #include "MouseConfiguration.h"
+#include "HIDTypes.h"
 
 MouseConfiguration::MouseConfiguration() : 
     BaseCompositeDeviceConfiguration(MOUSE_REPORT_ID),

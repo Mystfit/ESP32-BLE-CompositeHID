@@ -20,7 +20,7 @@ void MouseDevice::setConfig(const MouseConfiguration& config)
 
 void MouseDevice::init(NimBLEHIDDevice* hid)
 {
-    setCharacteristics(hid->inputReport(_config.getReportId()), nullptr);
+    setCharacteristics(hid->getInputReport(_config.getReportId()), nullptr);
 }
 
 const BaseCompositeDeviceConfiguration& MouseDevice::getDeviceConfig() const

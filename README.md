@@ -7,6 +7,14 @@ This library will let your ESP32 microcontroller behave as a bluetooth mouse, ke
 ## License
 Published under the MIT license. Please see license.txt.
 
+## Dependencies
+ - Nimble-Arduino. Actual version support Nimble-Arduino-2.1.2
+ - Callback. Available from the Arduino library manager or [here](https://github.com/tomstewart89/Callback).
+
+## Optional dependencies
+ - Keypad 
+ - Bounce2
+   
 ## XInput gamepad features
 
  - [x] All buttons and joystick axes available
@@ -49,9 +57,10 @@ Published under the MIT license. Please see license.txt.
 
 ## Installation
 - (Make sure your IDE of choice has support for ESP32 boards available. [Instructions can be found here.](https://github.com/espressif/arduino-esp32#installation-instructions))
-- In the Arduino IDE go to "Sketch" -> "Include Library" -> "Add .ZIP Library..." and select the file you just downloaded.
-- In the Arduino IDE go to "Tools" -> "Manage Libraries..." -> Filter for "NimBLE-Arduino" by h2zero and install.
-- You can now go to "File" -> "Examples" -> "ESP32-BLE-CompositeHID" and select an example to get started.
+- Download the zip version of this library from Github using either the "Code" -> "Download Zip" button or by cloning this repository to your Arduino library folder. If using the downloaded zip method, in the Arduino IDE go to "Sketch" -> "Include Library" -> "Add .ZIP Library..." and select the file you just downloaded.
+- Repeat the previous step but for the [NimBLE library](https://github.com/h2zero/NimBLE-Arduino)
+- Using the Arduino IDE Library manager, download the "Callback" library by Tom Stewart.
+- In the Arduino IDE, you can now go to "File" -> "Examples" -> "ESP32-BLE-CompositeHID" and select an example to get started.
 
 ## Example
 

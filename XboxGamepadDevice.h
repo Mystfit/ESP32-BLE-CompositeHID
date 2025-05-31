@@ -56,6 +56,8 @@ enum XboxDpadFlags : uint8_t {
 #define XBOX_STICK_MIN -32768
 #define XBOX_STICK_MAX 32767
 
+#define XBOX_AXIS_CENTER_OFFSET 0x8000
+
 
 // Forwards
 class XboxGamepadDevice;
@@ -66,10 +68,10 @@ class XboxGamepadCallbacks : public NimBLECharacteristicCallbacks
 public:
     XboxGamepadCallbacks(XboxGamepadDevice* device);
 
-    void onWrite(NimBLECharacteristic* pCharacteristic) override;
-    void onRead(NimBLECharacteristic* pCharacteristic) override;
-    void onNotify(NimBLECharacteristic* pCharacteristic) override;
-    void onStatus(NimBLECharacteristic* pCharacteristic, Status status, int code) override;
+    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
+    void onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
+    void onStatus(NimBLECharacteristic* pCharacteristic, int code) override;
+    void onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue) override;
 
 private:
     XboxGamepadDevice* _device;

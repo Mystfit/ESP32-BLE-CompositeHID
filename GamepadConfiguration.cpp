@@ -1,4 +1,5 @@
 #include "GamepadConfiguration.h"
+#include "HIDTypes.h"
 
 #if defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"

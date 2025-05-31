@@ -149,6 +149,6 @@ void testThumbsticks(){
         if(reportCount % 8 == 0)
             Serial.println("Setting left thumb to " + String(x) + ", " + String(y));
             
-        delay(10);
+        delay(8);
     }
 }

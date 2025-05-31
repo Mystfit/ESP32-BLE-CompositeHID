@@ -1,0 +1,69 @@
+---
+name: Compile Sketches
+
+'on':
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+    branches:
+      - "master"
+      - "ci-builds-*"
+  pull_request:
+  workflow_dispatch:
+  merge_group:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    - cron:  '15 0 1 * *'
+
+permissions: {}
+
+jobs:
+  compile-sketches:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # See: https://github.com/arduino/compile-sketches#readme
+      - name: Compile sketches
+        uses: arduino/compile-sketches@v1
+        with:
+          enable-deltas-report: true
+          fqbn: esp32:esp32:esp32
+          sketch-paths: |
+            # - examples/GamepadExamples/CharacteristicsConfiguration/CharacteristicsConfiguration.ino # disable because  esp_base_mac_addr_set is disabled in BleCompositeHID.cpp
+            - examples/GamepadExamples/DrivingControllerTest/DrivingControllerTest.ino
+            - examples/GamepadExamples/FlightControllerTest/FlightControllerTest.ino
+            - examples/GamepadExamples/Gamepad/Gamepad.ino
+            - examples/GamepadExamples/IndividualAxes/IndividualAxes.ino
+            - examples/GamepadExamples/Keypad4x4/Keypad4x4.ino
+            - examples/GamepadExamples/MultipleButtonsAndHats/MultipleButtonsAndHats.ino
+            - examples/GamepadExamples/MultipleButtonsDebounce/MultipleButtonsDebounce.ino
+            - examples/GamepadExamples/MultipleButtons/MultipleButtons.ino
+            - examples/GamepadExamples/PlayerIndicators/PlayerIndicators.ino
+            - examples/GamepadExamples/PotAsAxis/PotAsAxis.ino
+            - examples/GamepadExamples/SingleButtonDebounce/SingleButtonDebounce.ino
+            - examples/GamepadExamples/SingleButton/SingleButton.ino
+            - examples/GamepadExamples/SpecialButtons/SpecialButtons.ino
+            - examples/GamepadExamples/TestAll/TestAll.ino
+            - examples/XInputExamples/XboxXInputController/XboxXInputController.ino
+            - examples/KeyboardExamples/KeyboardLEDs/KeyboardLEDs.ino
+            - examples/KeyboardExamples/MediaKeys/MediaKeys.ino
+            - examples/KeyboardExamples/PressKey/PressKey.ino
+            - examples/MultipleDeviceExamples/DeferredReports/DeferredReports.ino
+            - examples/MultipleDeviceExamples/GamepadAndMouse/GamepadAndMouse.ino
+            - examples/MultipleDeviceExamples/GamepadMouseKeyboard/GamepadMouseKeyboard.ino
+            - examples/MultipleDeviceExamples/XBoxControllerAndKeyboard/XBoxControllerAndKeyboard.ino
+            - examples/SetBatteryLevel/SetBatteryLevel.ino
+          libraries: |
+            - name: callback
+            - name: NimBLE-Arduino
+            - name: Keypad
+            - name: Bounce2
+            - source-path: .
+
+      - name: Sketches report size delta
+        uses: arduino/report-size-deltas@v1
+        # Only run the action when the workflow is triggered by a pull request.
+        if: github.event_name == 'pull_request'

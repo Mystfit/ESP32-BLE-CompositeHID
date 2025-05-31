@@ -1,8 +1,8 @@
 /*
- * Sets BLE characteristic options
- * Also shows how to set a custom MAC address
- * Use BLE Scanner etc on Android to see them
- */
+* Sets BLE characteristic options
+* Also shows how to set a custom MAC address
+* Use BLE Scanner etc on Android to see them
+*/
 
 #include <Arduino.h>
 #include <GamepadDevice.h>
@@ -21,7 +21,7 @@ uint8_t newMACAddress[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF - 0x02};
     
 void setup()
 {
-    esp_base_mac_addr_set(&newMACAddress[0]); // Set new MAC address
+    //esp_base_mac_addr_set(&newMACAddress[0]); // Set new MAC address
 
     Serial.begin(115200);
     Serial.println("Starting BLE work!");
@@ -33,7 +33,7 @@ void setup()
     
     // Some non-Windows operating systems and web based gamepad testers don't like min axis set below 0, so 0 is set by default
     //bleGamepadConfig.setAxesMin(0x8001); // -32767 --> int16_t - 16 bit signed integer - Can be in decimal or hexadecimal
-	gamepadConfig.setAxesMin(0x0000); // 0 --> int16_t - 16 bit signed integer - Can be in decimal or hexadecimal    
+    gamepadConfig.setAxesMin(0x0000); // 0 --> int16_t - 16 bit signed integer - Can be in decimal or hexadecimal    
     gamepadConfig.setAxesMax(0x7FFF); // 32767 --> int16_t - 16 bit signed integer - Can be in decimal or hexadecimal     
     
     // Set up gamepad device late so we can pass our new config
@@ -45,6 +45,7 @@ void setup()
     // Set up the host configuration options for the top level composite HID device
     bleHostConfig.setVid(0xe502);
     bleHostConfig.setPid(0xabcd);
+    bleHostConfig.setHidType(HID_GAMEPAD);
     bleHostConfig.setModelNumber("1.0");
     bleHostConfig.setSoftwareRevision("Software Rev 1");
     bleHostConfig.setSerialNumber("9876543210");

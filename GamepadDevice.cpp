@@ -1,6 +1,8 @@
 #include "GamepadDevice.h"
 #include "BleCompositeHID.h"
 
+#include <stdexcept>
+
 #if defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
 #define LOG_TAG "GamepadDevice"
@@ -13,7 +15,7 @@ GamepadCallbacks::GamepadCallbacks(GamepadDevice* device) : _device(device)
 {
 }
 
-void GamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristic)
+void GamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo)
 {
     ESP_LOGD(LOG_TAG, "GamepadCallbacks::onWrite, value: %s", pCharacteristic->getValue().c_str());
     
@@ -36,19 +38,19 @@ void GamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristic)
     _device->onPlayerIndicatorChanged.fire(playerIndicator);
 }
 
-void GamepadCallbacks::onRead(NimBLECharacteristic* pCharacteristic)
+void GamepadCallbacks::onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo)
 {
     ESP_LOGD(LOG_TAG, "GamepadCallbacks::onRead");
 }
 
-void GamepadCallbacks::onNotify(NimBLECharacteristic* pCharacteristic)
+void GamepadCallbacks::onStatus(NimBLECharacteristic* pCharacteristic, int code)
 {
-    ESP_LOGD(LOG_TAG, "GamepadCallbacks::onNotify");
+    ESP_LOGD(LOG_TAG, "GamepadCallbacks::onStatus, code: %d", code);
 }
 
-void GamepadCallbacks::onStatus(NimBLECharacteristic* pCharacteristic, Status status, int code)
+void GamepadCallbacks::onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue)
 {
-    ESP_LOGD(LOG_TAG, "GamepadCallbacks::onStatus, status: %d, code: %d", status, code);
+    ESP_LOGD(LOG_TAG, "GamepadCallbacks::onSubscribe");
 }
 
 GamepadDevice::GamepadDevice() : 
@@ -72,22 +74,22 @@ GamepadDevice::GamepadDevice() :
     _hat2(0),
     _hat3(0),
     _hat4(0),
-    _callbacks(nullptr),
-    _setEffectCharacteristic(nullptr),
-    _setEnvelopeCharacteristic(nullptr),
-    _setConditionCharacteristic(nullptr),
-    _setPeriodicCharacteristic(nullptr),
-    _setConstantCharacteristic(nullptr),
-    _setRampCharacteristic(nullptr),
-    _setCustomForceCharacteristic(nullptr),
-    _downloadForceCharacteristic(nullptr),
-    _effectOperationCharacteristic(nullptr),
-    _pidDeviceControlCharacteristic(nullptr),
-    _deviceGainCharacteristic(nullptr),
-    _pidState(nullptr),
-    _createNewEffect(nullptr),
-    _pidBlockLoad(nullptr),
-    _pidPool(nullptr)
+    _callbacks(nullptr)
+    // _setEffectCharacteristic(nullptr),
+    // _setEnvelopeCharacteristic(nullptr),
+    // _setConditionCharacteristic(nullptr),
+    // _setPeriodicCharacteristic(nullptr),
+    // _setConstantCharacteristic(nullptr),
+    // _setRampCharacteristic(nullptr),
+    // _setCustomForceCharacteristic(nullptr),
+    // _downloadForceCharacteristic(nullptr),
+    // _effectOperationCharacteristic(nullptr),
+    // _pidDeviceControlCharacteristic(nullptr),
+    // _deviceGainCharacteristic(nullptr),
+    // _pidState(nullptr),
+    // _createNewEffect(nullptr),
+    // _pidBlockLoad(nullptr),
+    // _pidPool(nullptr)
 {
     this->resetButtons();
 }
@@ -109,10 +111,10 @@ GamepadDevice::~GamepadDevice()
 void GamepadDevice::init(NimBLEHIDDevice* hid)
 {
     // Create input characteristic to send events to the computer
-    auto input = hid->inputReport(_config.getReportId());
+    auto input = hid->getInputReport(_config.getReportId());
 
     // Create output characteristic to handle events coming from the computer
-    auto output = hid->outputReport(_config.getReportId());
+    auto output = hid->getOutputReport(_config.getReportId());
 
     // Set callbacks
     _callbacks = new GamepadCallbacks(this);
