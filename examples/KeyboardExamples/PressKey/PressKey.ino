@@ -9,6 +9,7 @@
 #define MODKEY_RANGE_MAX KEY_MOD_RMETA
 
 BleCompositeHID compositeHID("ESP32 Keyboard", "Mystfit", 100);
+BLEHostConfiguration bleHostConfig; 
 KeyboardDevice keyboard;
 
 void setup()
