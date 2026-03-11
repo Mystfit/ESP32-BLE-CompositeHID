@@ -341,9 +341,9 @@ void GamepadDevice::release(uint8_t b)
 
 uint8_t GamepadDevice::specialButtonBitPosition(uint8_t b)
 {
-    if (b >= POSSIBLESPECIALBUTTONS)
-        throw std::invalid_argument("Index out of range");
     uint8_t bit = 0;
+    if (b >= POSSIBLESPECIALBUTTONS)
+        return bit;
     for (int i = 0; i < b; i++)
     {
         if (_config.getWhichSpecialButtons()[i])
