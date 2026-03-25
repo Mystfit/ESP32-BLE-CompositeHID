@@ -182,6 +182,8 @@ void BleCompositeHID::taskServer(void *pvParameter)
     //uint8_t newMACAddress[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF - 0x02};
     //esp_base_mac_addr_set(&newMACAddress[0]); // Set new MAC address 
     NimBLEDevice::init(BleCompositeHIDInstance->deviceName);
+    //Set the 2M PHY as default for tx and rx. Should be safe to add since if there's no compatibility or unrealibility the bt adapter on the host will re-negotiate this.
+	NimBLEDevice::setDefaultPhy(BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK);
     NimBLEServer *pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(BleCompositeHIDInstance->_connectionStatus);
     pServer->advertiseOnDisconnect(true);
