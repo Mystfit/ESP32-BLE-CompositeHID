@@ -1,4 +1,5 @@
 #include "BleConnectionStatus.h"
+#include "BLEHostConfiguration.h"
 
 BleConnectionStatus::BleConnectionStatus(void) : _configuration(nullptr)
 {
