@@ -63,7 +63,9 @@ jobs:
             - name: Bounce2
             - source-path: .
 
-      - name: Sketches report size delta
-        uses: arduino/report-size-deltas@v1
-        # Only run the action when the workflow is triggered by a pull request.
+      - name: Upload sketches report
         if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sketches-report-${{ github.event.pull_request.number }}
+          path: sketches-reports

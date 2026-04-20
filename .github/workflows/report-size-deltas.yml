@@ -1,0 +1,18 @@
+name: Report Size Deltas
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  actions: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: arduino/report-size-deltas@v1
+        with:
+          sketches-reports-source: ^sketches-report-.*
