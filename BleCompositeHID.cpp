@@ -4,7 +4,6 @@
 #include "NimBLEHIDDevice.h"
 #include "HIDTypes.h"
 #include "HIDKeyboardTypes.h"
-#include <driver/adc.h>
 #include "sdkconfig.h"
 
 #include "BleCompositeHID.h"
