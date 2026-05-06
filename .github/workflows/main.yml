@@ -32,7 +32,7 @@ jobs:
           enable-deltas-report: true
           fqbn: esp32:esp32:esp32
           sketch-paths: |
-            # - examples/GamepadExamples/CharacteristicsConfiguration/CharacteristicsConfiguration.ino # disable because  esp_base_mac_addr_set is disabled in BleCompositeHID.cpp
+            - examples/GamepadExamples/CharacteristicsConfiguration/CharacteristicsConfiguration.ino # disable because  esp_base_mac_addr_set is disabled in BleCompositeHID.cpp
             - examples/GamepadExamples/DrivingControllerTest/DrivingControllerTest.ino
             - examples/GamepadExamples/FlightControllerTest/FlightControllerTest.ino
             - examples/GamepadExamples/Gamepad/Gamepad.ino
@@ -56,6 +56,8 @@ jobs:
             - examples/MultipleDeviceExamples/GamepadMouseKeyboard/GamepadMouseKeyboard.ino
             - examples/MultipleDeviceExamples/XBoxControllerAndKeyboard/XBoxControllerAndKeyboard.ino
             - examples/SetBatteryLevel/SetBatteryLevel.ino
+            - examples/dualsenseExamples/Dualsense_Edge_Controller/Dualsense_Edge_Controller.ino
+            - examples/dualsenseExamples/Dualsense_Edge_Polling_Test/Dualsense_Edge_Polling_Test.ino
           libraries: |
             - name: callback
             - name: NimBLE-Arduino
@@ -63,7 +65,9 @@ jobs:
             - name: Bounce2
             - source-path: .
 
-      - name: Sketches report size delta
-        uses: arduino/report-size-deltas@v1
-        # Only run the action when the workflow is triggered by a pull request.
+      - name: Upload sketches report
         if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sketches-report-${{ github.event.pull_request.number }}
+          path: sketches-reports

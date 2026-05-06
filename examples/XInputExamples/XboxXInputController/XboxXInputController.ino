@@ -8,6 +8,9 @@ int ledPin = 5; // LED connected to digital pin 13
 XboxGamepadDevice *gamepad;
 BleCompositeHID compositeHID("ESP32 SeriesX Controller", "Mystfit", 100);
 
+// FunctionSlot must be global to persist after setup() completes
+FunctionSlot<XboxGamepadOutputReportData> vibrationSlot(OnVibrateEvent);
+
 void OnVibrateEvent(XboxGamepadOutputReportData data)
 {
     if(data.weakMotorMagnitude > 0 || data.strongMotorMagnitude > 0){
@@ -41,8 +44,7 @@ void setup()
     // Set up gamepad
     gamepad = new XboxGamepadDevice(config);
 
-    // Set up vibration event handler
-    FunctionSlot<XboxGamepadOutputReportData> vibrationSlot(OnVibrateEvent);
+    // Attach vibration event handler (FunctionSlot is defined globally)
     gamepad->onVibrate.attach(vibrationSlot);
 
     // Add all child devices to the top-level composite HID device to manage them

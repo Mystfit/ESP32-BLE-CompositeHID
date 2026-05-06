@@ -1,10 +1,10 @@
 #include "MouseConfiguration.h"
 #include "HIDTypes.h"
 
-MouseConfiguration::MouseConfiguration() : 
+MouseConfiguration::MouseConfiguration() :
     BaseCompositeDeviceConfiguration(MOUSE_REPORT_ID),
-    _mouseButtonCount(5),
-    _whichAxes{true, true, false, false, false, false, true, true}
+    _whichAxes{true, true, false, false, false, false, true, true},
+    _mouseButtonCount(5)
 {               
 }
 

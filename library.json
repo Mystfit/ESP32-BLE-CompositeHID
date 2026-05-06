@@ -1,7 +1,7 @@
 {
     "$schema": "https://raw.githubusercontent.com/platformio/platformio-core/develop/platformio/assets/schema/library.json",
     "name": "ESP32-BLE-CompositeHID",
-    "version": "0.3.1",
+    "version": "0.4.0",
     "description": "Bluetooth LE Gamepad + Mouse + Keyboard library for the ESP32",
     "keywords": [
         "Communication"
@@ -30,7 +30,8 @@
         "GamepadDevice.h",
         "KeyboardDevice.h",
         "MouseDevice.h",
-        "XboxGamepadDevice.h"
+        "XboxGamepadDevice.h",
+        "DualSenseGamepadDevice.h"
     ],
     "examples": [
         {

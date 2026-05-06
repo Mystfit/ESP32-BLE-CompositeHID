@@ -1,10 +1,10 @@
 #ifndef COMPOSITE_CONFIG_H
 #define COMPOSITE_CONFIG_H
 
-#include <Arduino.h>
 //#include <HIDKeyboardTypes.h>
 #include <NimBLECharacteristic.h>
 #include <NimBLEHIDDevice.h>
+#include <functional>
 #include "BLEHostConfiguration.h"
 
 // Forwards

@@ -3,8 +3,8 @@
 
 BaseCompositeDeviceConfiguration::BaseCompositeDeviceConfiguration(uint8_t reportId) : 
     _autoReport(true),
-    _reportId(reportId),
-    _autoDefer(false)
+    _autoDefer(false),
+    _reportId(reportId)
 {
 }
 

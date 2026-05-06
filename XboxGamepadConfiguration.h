@@ -7,6 +7,7 @@
 class XboxGamepadDeviceConfiguration : public BaseCompositeDeviceConfiguration {
 public:
     XboxGamepadDeviceConfiguration(uint8_t reportId = XBOX_INPUT_REPORT_ID);
+    virtual ~XboxGamepadDeviceConfiguration() = default;
     virtual uint8_t getDeviceReportSize() const override { return 0; }
     virtual size_t makeDeviceReport(uint8_t* buffer, size_t bufferSize) const override { 
         return -1;

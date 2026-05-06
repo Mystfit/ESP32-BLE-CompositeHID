@@ -119,7 +119,7 @@ struct XboxGamepadInputReportData {
 #pragma pack(pop)
 
 
-static uint8_t dPadDirectionToValue(XboxDpadFlags direction){
+inline uint8_t dPadDirectionToValue(XboxDpadFlags direction){
     if(direction == XboxDpadFlags::NORTH)
         return XBOX_BUTTON_DPAD_NORTH;
     else if(direction == (XboxDpadFlags::EAST | XboxDpadFlags::NORTH))
@@ -140,7 +140,7 @@ static uint8_t dPadDirectionToValue(XboxDpadFlags direction){
     return XBOX_BUTTON_DPAD_NONE;
 }
 
-static String dPadDirectionName(uint8_t direction){
+inline String dPadDirectionName(uint8_t direction){
     if(direction == XBOX_BUTTON_DPAD_NORTH)
         return "NORTH";
     else if(direction == XBOX_BUTTON_DPAD_NORTHEAST)
