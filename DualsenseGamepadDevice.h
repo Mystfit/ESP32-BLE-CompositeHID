@@ -157,6 +157,34 @@ private:
     DualsenseGamepadDevice* _device;
 };
 
+// Haptic-audio frame extracted from a DualSense BT 0x31 output report.
+//
+// The DualSense BT output report's 24-byte "reserved4" region (bytes 50-73 of
+// the 78-byte wire form) is empirically forwarded byte-for-byte by Linux's
+// BlueZ HID-over-GATT bridge to BLE peripherals — verified with
+// scripts/ds-haptic-probe.py against this firmware. We treat that window as
+// 8-bit signed PCM, stereo interleaved (L0 R0 L1 R1 ... L11 R11 = 12 stereo
+// frames per packet). Sample rate is host-defined; at the firmware level we
+// just expose what arrived. A typical writer at 100 Hz packet rate yields
+// ~1.2 kHz stereo, sufficient for low-frequency VCA / LRA haptic actuators.
+//
+// Pointers are zero-copy slices into the live BLE buffer and are ONLY valid
+// for the duration of the onHapticAudioReceived callback. Copy out (e.g. into
+// a ring buffer) if you need to consume them asynchronously.
+//
+// This is a contract our emulator defines: any host that wants haptic audio
+// to reach the controller writes 8-bit signed PCM into bytes 50-73 of the
+// 0x31 output report. Real PS5-targeted hosts (DSX-on-Windows) currently do
+// NOT use this path — see the project notes in
+// examples/dualsenseExamples/Dualsense_Edge_Controller.
+struct HapticAudioFrame {
+    const int8_t*  samples           = nullptr;  // interleaved L R L R ...
+    size_t         sampleCount       = 0;        // per-channel; total bytes = sampleCount * 2
+    uint8_t        audioControlBits  = 0;        // mirrors output report audio_control
+    uint8_t        audioControl2Bits = 0;        // mirrors output report audio_control2
+    uint8_t        seq               = 0;        // upper nibble of seq_tag
+};
+
 // DualSense BT Output Report parsed view (wire format is 78 bytes).
 // Based on Linux hid-playstation.c dualsense_output_report_bt struct.
 // This is NOT a packed wire struct: load() decodes the raw bytes field by
@@ -205,6 +233,17 @@ struct DualsenseGamepadOutputReportData {
 
     uint8_t reserved4[24] = { 0 };  // Bytes 50-73
     uint32_t crc32 = 0;             // Bytes 74-77
+
+    // Raw view of the BLE output-report buffer that produced this struct.
+    // Populated by load(); used by the haptic-audio sniffer and by the
+    // (future) hapticAudio() accessor to read regions outside the named
+    // fields. Pointer is borrowed from the live BLE buffer and is ONLY
+    // valid for the duration of the onReceivedOutputReport callback.
+    // common_offset_used is the offset into raw_data where the 47-byte
+    // common section begins (selected by load() based on wire format).
+    const uint8_t* raw_data            = nullptr;
+    size_t         raw_size            = 0;
+    int            common_offset_used  = 0;
 
     // Decoded view of a Feedback effect (DS_TRIGGER_EFFECT_FEEDBACK, 0x21).
     // Wire encoding:
@@ -621,6 +660,37 @@ struct DualsenseGamepadOutputReportData {
                  ParsedTriggerEffect::classifySubtype(right_trigger_motor_mode, right_trigger_param) };
     }
 
+    // Haptic-audio window: bytes immediately after the 47-byte common section
+    // and before the 4-byte CRC trailer. On the standard 78-byte BT 0x31
+    // wire form (or 77-byte BLE form with report_id stripped) this yields
+    // 24 bytes = 12 stereo 8-bit-signed PCM frames. See HapticAudioFrame.
+    static constexpr size_t DS_HAPTIC_WINDOW_BYTES   = 24;
+    static constexpr size_t DS_HAPTIC_FRAMES_PER_PKT = DS_HAPTIC_WINDOW_BYTES / 2;
+    static constexpr size_t DS_COMMON_SECTION_BYTES  = 47;
+    static constexpr size_t DS_CRC_BYTES             = 4;
+
+    bool hasHapticAudio() const {
+        if (!raw_data) return false;
+        const size_t need = (size_t)common_offset_used
+                          + DS_COMMON_SECTION_BYTES
+                          + DS_HAPTIC_WINDOW_BYTES;
+        // CRC is optional (firmware tolerates short reports); window must fit
+        // even when no CRC is present.
+        return raw_size >= need;
+    }
+
+    HapticAudioFrame hapticAudio() const {
+        HapticAudioFrame f;
+        if (!hasHapticAudio()) return f;
+        const size_t window_start = (size_t)common_offset_used + DS_COMMON_SECTION_BYTES;
+        f.samples           = reinterpret_cast<const int8_t*>(raw_data + window_start);
+        f.sampleCount       = DS_HAPTIC_FRAMES_PER_PKT;
+        f.audioControlBits  = audio_control;
+        f.audioControl2Bits = audio_control2;
+        f.seq               = (seq_tag >> 4) & 0x0F;
+        return f;
+    }
+
     // ----- Named predicate accessors --------------------------------------
     // Wrap the raw valid_flag* bit checks so user code reads as intent rather
     // than as bit arithmetic. The raw flag bytes and DS_OUT_FLAG*_* macros
@@ -735,6 +805,14 @@ struct DualsenseGamepadOutputReportData {
             tag = 0;
             common_offset = 0;
         }
+
+        // Stash the raw buffer for downstream consumers that need to inspect
+        // bytes outside the named fields (haptic-audio sniffer, hapticAudio()).
+        // Borrowed pointer; valid only for the lifetime of this load() call's
+        // caller scope (i.e., the onReceivedOutputReport callback).
+        raw_data = value;
+        raw_size = size;
+        common_offset_used = common_offset;
 
         // Parse common section (47 bytes)
         // Common structure: valid_flag0, valid_flag1, motor_right, motor_left, ...
@@ -901,6 +979,14 @@ public:
     const BaseCompositeDeviceConfiguration* getDeviceConfig() const override;
 
     Signal<DualsenseGamepadOutputReportData> onReceivedOutputReport;
+
+    // Fires once per 0x31 output report that contains a writable haptic-audio
+    // window (24 bytes between the common section and the CRC trailer).
+    // The HapticAudioFrame holds zero-copy pointers into the live BLE buffer
+    // and is valid only for the duration of the slot invocation; copy the
+    // samples into a ring buffer if you need them asynchronously.
+    // See HapticAudioFrame in this header for the wire-format contract.
+    Signal<HapticAudioFrame> onHapticAudioReceived;
 
     // Input Controls
     void resetInputs();

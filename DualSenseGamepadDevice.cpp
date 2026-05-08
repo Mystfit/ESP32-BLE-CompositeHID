@@ -96,6 +96,15 @@ void DualsenseGamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristic, N
 
     if (len >= 47 && outputData.load(data, len)) {
         _device->onReceivedOutputReport.fire(outputData);
+
+        // Haptic-audio window fan-out. Fires only when the report carries the
+        // 24-byte audio window (i.e. is a full 0x31 BT-form output, not a
+        // truncated USB-format write). Subscribers that only care about
+        // haptics can attach to onHapticAudioReceived and skip the fuller
+        // onReceivedOutputReport struct.
+        if (outputData.hasHapticAudio()) {
+            _device->onHapticAudioReceived.fire(outputData.hapticAudio());
+        }
     }
 }
 

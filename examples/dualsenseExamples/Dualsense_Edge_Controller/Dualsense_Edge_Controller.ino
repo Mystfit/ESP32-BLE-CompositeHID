@@ -14,17 +14,35 @@
  * descriptor, proactively indicating calibration on input subscribe, forcing GATT Service
  * Changed to re-read calibration, and spoofing a Sony Bluetooth OUI.
  *
- * Advanced haptic features (audio-based vibration, adaptive triggers) still require a USB
- * connection — over Bluetooth only basic dual-motor rumble is supported, matching the real
- * DualSense.
+ * Advanced haptic features (audio-based vibration, adaptive triggers) over Bluetooth depend
+ * on the host stack — see HAPTIC AUDIO below.
  *
- * BLE-REACHABLE HAPTIC PROXY:
- * True VCA haptic audio (what DSX calls "BT Haptics" / "Sound Waves") is streamed over the
- * Bluetooth Classic HID interrupt channel via an undocumented Sony firmware path. It does
- * not reach BLE HoGP peripherals. If you want a host-driven haptic signal that DOES survive
- * BLE, the adaptive-trigger "Vibration" effect (DS_TRIGGER_EFFECT_VIBRATION, type 0x26)
- * travels inside the standard 0x31 output report and carries frequency + amplitude. You can
- * drive an external LRA/VCA amplifier from those values — see OnVibrateEvent below.
+ * HAPTIC AUDIO over BLE — what works and what doesn't:
+ *
+ *  - Windows / DSX: empirically does NOT push haptic-audio bytes through the BLE HoGP path.
+ *    DSX's "Haptic Feedback" / "Audio to Haptics" UI explicitly notes the feature is
+ *    USB-only. A live capture (see examples/dualsenseExamples/Dualsense_Haptic_Sniffer)
+ *    confirms: with DSX driving haptics, every BLE output report is a static heartbeat with
+ *    all data fields zero. Windows appears to route VCA audio to BT-Classic HID, which
+ *    BLE peripherals don't expose.
+ *
+ *  - Linux + BlueZ: DOES forward arbitrary 0x31 output report bytes through the HoGP path
+ *    to BLE peripherals. Verified with scripts/ds-haptic-probe.py, which writes synthetic
+ *    78-byte reports to /dev/hidrawN and is received byte-for-byte by the firmware. This
+ *    means a custom Linux host (or any tool that writes via hidraw, à la SAxense
+ *    https://github.com/egormanga/SAxense) CAN deliver haptic audio over BLE.
+ *
+ *  - The library exposes the haptic-audio window via DualsenseGamepadDevice::
+ *    onHapticAudioReceived (fires per 0x31 output report containing the 24-byte audio
+ *    window between common-section and CRC). HapticAudioFrame.samples is interleaved
+ *    8-bit signed PCM, 12 stereo frames per packet. See examples/dualsenseExamples/
+ *    Dualsense_Haptic_I2S for a worked driver that pipes the bytes to an I2S DAC.
+ *
+ * BLE-reachable haptic FALLBACK without audio:
+ *  The adaptive-trigger "Vibration" effect (DS_TRIGGER_EFFECT_VIBRATION, type 0x26) carries
+ *  frequency + amplitude inside the standard 0x31 output report and is set by some hosts
+ *  (and trivially by DSX) regardless of BLE/USB. See OnVibrateEvent below if you want a
+ *  cross-host haptic signal that doesn't depend on a custom Linux writer.
  */
 
 #include <BleConnectionStatus.h>
