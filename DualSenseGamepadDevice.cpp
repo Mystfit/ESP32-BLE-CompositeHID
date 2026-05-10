@@ -81,11 +81,13 @@ void DualsenseGamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristic, N
         else if (pCharacteristic == _device->getFirmwareInfo())  role = "FEATURE-0x20";
         else if (pCharacteristic == _device->getBtPatchInfo())   role = "FEATURE-0x22";
     }
-    // Full hex dump so we can see exactly what the host is writing - critical
-    // for confirming whether tools like DSX are sending output reports at all,
-    // and for inspecting reserved regions we don't parse into named fields.
-    ESP_LOGD(LOG_TAG, "*** onWrite: role=%s handle=%d size=%d connHandle=%d ***",
-        role, handle, len, connInfo.getConnHandle());
+    // Debug-level — printing every output report at info level was found to
+    // back up the NimBLE host thread when 0x36 audio-haptic writes arrive at
+    // ~100 Hz (the serial port can't keep up with ~12 KB/s of log lines, and
+    // the blocking print starves NimBLE's mbuf drain, which triggers the
+    // task watchdog). Enable Core Debug Level = Debug if you need to see it.
+    ESP_LOGD(LOG_TAG, "*** onWrite: role=%s handle=%d first_byte=0x%02X size=%d connHandle=%d ***",
+        role, handle, len > 0 ? data[0] : 0, len, connInfo.getConnHandle());
     ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, data, len, ESP_LOG_DEBUG);
 
     if (len < 47) {
@@ -215,10 +217,26 @@ void DualsenseGamepadDevice::init(NimBLEHIDDevice* hid)
     NimBLECharacteristic* output = hid->getOutputReport(DUALSENSE_EDGE_OUTPUT_REPORT_ID);
     _callbacks = new DualsenseGamepadCallbacks(this);
 
+    // Second output characteristic for the haptic-audio sub-protocol report
+    // (0x32). Real DualSense-targeted tools (SAxense, kijimad/soundsense) write
+    // 142-byte 0x32 reports carrying 0x11 control + 0x12 audio sub-packets;
+    // the parser in DualsenseGamepadOutputReportData::load() recognises both
+    // formats so the same callback handles either characteristic.
+    NimBLECharacteristic* hapticOutput = hid->getOutputReport(DUALSENSE_EDGE_HAPTIC_OUTPUT_REPORT_ID);
+
+    // Third output characteristic for the larger haptic-audio report (0x36).
+    // Same 0x11 + 0x12 sub-packet protocol as 0x32 but in a 398-byte buffer,
+    // with room for an optional 0x15 sub-packet for headset audio. Recent
+    // Unreal-Dualsense plugin builds emit this variant. Without a dedicated
+    // characteristic, Windows BLE HoGP has nowhere to deliver 0x36 writes.
+    NimBLECharacteristic* hapticOutputLarge = hid->getOutputReport(DUALSENSE_EDGE_HAPTIC_OUTPUT_REPORT_ID_LARGE);
+
     // Set callbacks on all characteristics so we can track reads/writes
     input->setCallbacks(_callbacks);
     _minimalInput->setCallbacks(_callbacks);
     output->setCallbacks(_callbacks);
+    hapticOutput->setCallbacks(_callbacks);
+    hapticOutputLarge->setCallbacks(_callbacks);
 
     // pending callbacks for pairing and stuff
     _calibration = hid->getFeatureReport(DUALSENSE_CALIBRATION_REPORT_ID);
@@ -233,9 +251,9 @@ void DualsenseGamepadDevice::init(NimBLEHIDDevice* hid)
     setCharacteristics(input, output);
 
     // Log characteristic handles for debugging
-    ESP_LOGI(LOG_TAG, "Characteristic handles: input=%d, output=%d, calibration=%d, firmwareInfo=%d, pairingInfo=%d",
-        input->getHandle(), output->getHandle(), _calibration->getHandle(),
-        _firmwareInfo->getHandle(), _pairingInfo->getHandle());
+    ESP_LOGI(LOG_TAG, "Characteristic handles: input=%d, output=%d, hapticOutput=%d, hapticOutputLarge=%d, calibration=%d, firmwareInfo=%d, pairingInfo=%d",
+        input->getHandle(), output->getHandle(), hapticOutput->getHandle(), hapticOutputLarge->getHandle(),
+        _calibration->getHandle(), _firmwareInfo->getHandle(), _pairingInfo->getHandle());
     m_pCrcTable = new uint32_t[256];
     generate_crc_table(m_pCrcTable);
 

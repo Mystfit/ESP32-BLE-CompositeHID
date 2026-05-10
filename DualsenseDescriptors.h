@@ -19,6 +19,26 @@
 #define DUALSENSE_MINIMAL_INPUT_REPORT_ID 0x01
 #define DUALSENSE_MINIMAL_INPUT_REPORT_SIZE 9  // 4 stick bytes + 1 hat+pad byte + 2 buttons+pad bytes + 2 trigger bytes
 
+// Report 0x32: DualSense haptic-audio sub-protocol output report.
+// Wire layout: [report_id 0x32][seq_tag][sub-packet stream][CRC32-LE].
+// Total size 142 bytes (141 payload bytes declared in the HID descriptor).
+// Carries sub-packets 0x11 (control / engine state + frame counter) and
+// 0x12 (8-bit signed stereo PCM samples). See DualsenseGamepadDevice.h
+// HapticAudioFrame and DualsenseGamepadOutputReportData::load() for the
+// sub-packet parser. Used by SAxense / kijimad-soundsense and equivalent
+// to the BT-Classic 0x36 packet DS5Dongle forwards.
+#define DUALSENSE_EDGE_HAPTIC_OUTPUT_REPORT_ID 0x32
+#define DUALSENSE_HAPTIC_REPORT_PAYLOAD_SIZE   141
+#define DUALSENSE_HAPTIC_REPORT_TOTAL_SIZE     142
+
+// Report 0x36: larger haptic-audio output report. Same 0x11 + 0x12 sub-packet
+// protocol as 0x32 but in a 398-byte buffer (397 payload + report ID), with
+// room for an optional 0x15 sub-packet carrying headset audio passthrough.
+// Used by recent Unreal-Dualsense plugin builds.
+#define DUALSENSE_EDGE_HAPTIC_OUTPUT_REPORT_ID_LARGE 0x36
+#define DUALSENSE_HAPTIC_LARGE_REPORT_PAYLOAD_SIZE   397
+#define DUALSENSE_HAPTIC_LARGE_REPORT_TOTAL_SIZE     398
+
 #define DS_OUTPUT_REPORT_BT_SIZE 78
 #define PS_INPUT_CRC32_SEED 0xA1
 #define PS_OUTPUT_CRC32_SEED 0xA2

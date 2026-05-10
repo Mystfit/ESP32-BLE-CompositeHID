@@ -65,6 +65,41 @@ BleCompositeHID compositeHID("Libresteishon Edge", "YeaSeb", 100);
 FunctionSlot<DualsenseGamepadOutputReportData> vibrationSlot(OnVibrateEvent);
 FunctionSlot<DualsenseGamepadOutputReportData> ledSlot(OnLEDEvent);
 
+// --- Haptic-audio verifier --------------------------------------------
+// Counts haptic-audio frames as they arrive and tracks the per-packet peak
+// amplitude. loop() runs an envelope follower over the peaks and drives
+// ledPin via PWM, so the LED brightness tracks audio loudness like a VU
+// meter — bright on loud bursts, dim on quiet, smooth fade between rather
+// than sample-rate flicker. Shares the LED with the rumble visualiser;
+// when haptic audio goes silent the LED is released back to rumble's
+// HIGH-while-motor-on logic (see updateHapticLEDIfDue).
+// Sources that drive this:
+//   - Linux: scripts/ds-haptic-probe.py --pattern sine
+//   - Windows + Unreal-Dualsense (with the upstream PR patches): the
+//     plugin's audio submix listener emits 0x36 audio-haptic reports.
+static volatile uint32_t g_haptic_events       = 0;
+static volatile uint8_t  g_haptic_peak         = 0;   // 0..127 (|int8|)
+static uint32_t          g_last_haptic_event_ms = 0;
+
+static void OnHapticAudio(HapticAudioFrame frame)
+{
+    if (!frame.samples || frame.sampleCount == 0) return;
+    g_haptic_events++;
+    // Scan both channels and record the peak |sample| for this packet.
+    // Promote to int16 so abs(-128) doesn't overflow int8.
+    int16_t peak = 0;
+    const size_t total = frame.sampleCount * 2;  // stereo interleaved
+    for (size_t i = 0; i < total; ++i) {
+        int16_t s = frame.samples[i];
+        int16_t a = s < 0 ? -s : s;
+        if (a > peak) peak = a;
+    }
+    g_haptic_peak          = (peak > 127) ? 127 : (uint8_t)peak;
+    g_last_haptic_event_ms = millis();
+}
+
+FunctionSlot<HapticAudioFrame> hapticSlot(OnHapticAudio);
+
 void OnLEDEvent(DualsenseGamepadOutputReportData data)
 {
     if(data.lightbar_setup != LEDmode){
@@ -218,11 +253,11 @@ void OnVibrateEvent(DualsenseGamepadOutputReportData data)
     auto rt = data.rightTrigger();
     if (data.hasLeftTriggerEffect()) {
         if(!message.isEmpty()) message += ",";
-        message += "L2=" + formatTriggerEffect(lt);
+        message += "adaptive_trigger_L2=" + formatTriggerEffect(lt);
     }
     if (data.hasRightTriggerEffect()) {
         if(!message.isEmpty()) message += ",";
-        message += " R2=" + formatTriggerEffect(rt);
+        message += ", adaptive_trigger_R2=" + formatTriggerEffect(rt);
     }
 
     // Raw byte dump for active trigger effects — helps verify decoded values.
@@ -239,12 +274,91 @@ void OnVibrateEvent(DualsenseGamepadOutputReportData data)
     // }
 
     if(!message.isEmpty()) Serial.println(message);
+    // LED is driven from updateLEDIfDue() in loop() — keep BLE callback
+    // free of hardware writes (see memory note feedback_ble_callback_logging).
+    // Updating motor_left / motor_right above is enough; the loop tick
+    // reads them and writes the LED.
+}
 
-    if (motor_left > 0 || motor_right > 0) {
-        digitalWrite(ledPin, HIGH);
-    } else {
-        digitalWrite(ledPin, LOW);
+// Drive the onboard NeoPixel (RGB_BUILTIN) at 50 Hz as the single LED
+// owner for both haptic audio and rumble. Priority: haptic audio wins
+// while it's actively arriving (last 200 ms), otherwise rumble takes
+// over, otherwise the LED is off. Doing this in loop() instead of in
+// OnVibrateEvent keeps NimBLE callbacks free of hardware writes (see
+// feedback_ble_callback_logging memory note) and keeps both paths
+// from fighting over the same LED.
+//
+// Color scheme:
+//   - Haptic audio active : blue, brightness scales with packet peak.
+//   - Rumble active       : red = motor_left strength, green = motor_right.
+//   - Silent              : off.
+//
+static uint32_t last_haptic_led_ms = 0;
+static bool     led_driving        = false;
+
+// Silence floor (out of 127) for haptic peaks. Below this we treat as
+// no-audio so the rumble path can take over the LED.
+static constexpr uint8_t HAPTIC_LED_SILENCE = 12;
+
+static void updateLEDIfDue()
+{
+    uint32_t now = millis();
+    if (now - last_haptic_led_ms < 20) return;
+    last_haptic_led_ms = now;
+
+    // Priority 1: haptic audio (most recent activity wins).
+    bool haptic_active = (now - g_last_haptic_event_ms <= 200);
+    if (haptic_active) {
+        uint8_t peak = g_haptic_peak;
+        uint8_t b    = 0;
+        if (peak >= HAPTIC_LED_SILENCE) {
+            // Linear mapping: peak * 2 puts the LED clearly in "blue"
+            // territory at typical music levels (peak 60 -> b=120,
+            // peak 100 -> b=200, peak 127 -> b=254). Linear (not
+            // square-law) because at low brightness pure blue can read
+            // as greenish on the human eye, so we want enough drive
+            // for the colour to be unambiguous.
+            uint16_t v = (uint16_t)peak << 1;
+            b = v > 255 ? 255 : (uint8_t)v;
+        }
+        rgbLedWrite(RGB_BUILTIN, 0, 0, b);
+        led_driving = true;
+        return;
     }
+
+    // Priority 2: rumble. Red = weak (left) motor, green = strong
+    // (right) motor. Square-law for perceptual feel.
+    if (motor_left > 0 || motor_right > 0) {
+        uint8_t r = (uint8_t)(((uint16_t)motor_left  * motor_left)  >> 7);
+        uint8_t g = (uint8_t)(((uint16_t)motor_right * motor_right) >> 7);
+        rgbLedWrite(RGB_BUILTIN, r, g, 0);
+        led_driving = true;
+        return;
+    }
+
+    // Priority 3: idle.
+    if (led_driving) {
+        rgbLedWrite(RGB_BUILTIN, 0, 0, 0);
+        led_driving = false;
+    }
+}
+
+// Print a one-line summary every 5 s, but only if new haptic events have
+// arrived since the last print. Keeps the serial console quiet for the
+// button-press testing flow when no haptic stream is active.
+static uint32_t last_haptic_stats_ms = 0;
+static uint32_t last_haptic_print_count = 0;
+static void emitHapticStatsIfDue()
+{
+    uint32_t now = millis();
+    if (now - last_haptic_stats_ms < 5000) return;
+    last_haptic_stats_ms = now;
+    uint32_t total = g_haptic_events;
+    if (total == last_haptic_print_count) return;
+    Serial.printf("[haptic] events=%u (delta=%u in 5s)\n",
+                  (unsigned)total,
+                  (unsigned)(total - last_haptic_print_count));
+    last_haptic_print_count = total;
 }
 
 void setup()
@@ -271,6 +385,7 @@ void setup()
     // Attach event handlers (FunctionSlots are defined globally)
     dualsense->onReceivedOutputReport.attach(vibrationSlot);
     dualsense->onReceivedOutputReport.attach(ledSlot);
+    dualsense->onHapticAudioReceived.attach(hapticSlot);
 
     // Add all child devices to the top-level composite HID device to manage them
     compositeHID.addDevice(dualsense);
@@ -294,6 +409,9 @@ void setup()
 
 void loop()
 {
+    updateLEDIfDue();
+    emitHapticStatsIfDue();
+
     if (compositeHID.isConnected()) {
         int selection = -1;
         const float STEP = 0.05; // angle change per frame (speed)

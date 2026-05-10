@@ -182,6 +182,14 @@ void BleCompositeHID::taskServer(void *pvParameter)
     //uint8_t newMACAddress[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF - 0x02};
     //esp_base_mac_addr_set(&newMACAddress[0]); // Set new MAC address 
     NimBLEDevice::init(BleCompositeHIDInstance->deviceName);
+    // Request maximum ATT MTU (517 bytes per BLE spec). Without this, NimBLE
+    // negotiates the default ~256 — which means Write-Without-Response is
+    // capped at ~253 bytes per packet. HID-over-GATT hosts (Windows in
+    // particular) use WWR for output reports and don't fall back to Long
+    // Write for larger payloads, so any HID output report > ~253 bytes is
+    // rejected with ERROR_INVALID_PARAMETER. The DualSense 0x36 audio-haptic
+    // report (398 bytes wire) hits exactly this case.
+    NimBLEDevice::setMTU(517);
     //Set the 2M PHY as default for tx and rx. Should be safe to add since if there's no compatibility or unrealibility the bt adapter on the host will re-negotiate this.
 	NimBLEDevice::setDefaultPhy(BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK);
     NimBLEServer *pServer = NimBLEDevice::createServer();

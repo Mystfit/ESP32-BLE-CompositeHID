@@ -54,13 +54,16 @@
 #define I2S_PORT       I2S_NUM_0
 #endif
 
-// Output sample rate. The DualSense haptic window contract is
-// "12 stereo frames per BLE output report"; the *effective* rate is
-// frames-per-packet × packets-per-second on the host side. Pick an I2S
-// rate near the expected effective rate for the smoothest playback. The
-// ring buffer absorbs short host stalls; longer stalls produce silence.
+// Output sample rate. Match this to the host's effective output rate
+// (frames-per-packet × packets-per-second). Common cases:
+//   - Linux ds-haptic-probe.py / older 0x32 audio path: ~1500 Hz fits
+//     12 frames/packet × ~100 Hz reporting.
+//   - Unreal-Dualsense plugin (0x36 audio path): the plugin's submix
+//     listener resamples to 3000 Hz internally and emits 32 frames/packet
+//     in two halves, so the effective rate is 3000 Hz.
+// Pick the higher rate when uncertain; the ring buffer absorbs stalls.
 #ifndef I2S_SAMPLE_RATE_HZ
-#define I2S_SAMPLE_RATE_HZ  1500
+#define I2S_SAMPLE_RATE_HZ  3000
 #endif
 
 // --- Ring buffer (single producer = BLE cb, single consumer = I2S task) -
@@ -131,6 +134,32 @@ static void OnHapticAudio(HapticAudioFrame frame)
 
 FunctionSlot<HapticAudioFrame> hapticSlot(OnHapticAudio);
 
+// --- Output-report diagnostics -----------------------------------------
+//
+// Tally output-report IDs as they arrive so we can see at a glance which
+// transport the host is using. The Unreal-Dualsense plugin (and other hosts)
+// will send 0x02 USB-style reports if it classifies the device as USB, and
+// only emit 0x32 audio-haptic writes when classified as Bluetooth. This
+// makes it obvious whether haptic-audio packets are actually transiting BLE.
+static volatile uint32_t g_reports_0x02   = 0;
+static volatile uint32_t g_reports_0x31   = 0;
+static volatile uint32_t g_reports_0x32   = 0;
+static volatile uint32_t g_reports_0x36   = 0;
+static volatile uint32_t g_reports_other  = 0;
+
+static void OnOutputReport(DualsenseGamepadOutputReportData data)
+{
+    switch (data.report_id) {
+        case 0x02: g_reports_0x02++;  break;
+        case 0x31: g_reports_0x31++;  break;
+        case 0x32: g_reports_0x32++;  break;
+        case 0x36: g_reports_0x36++;  break;
+        default:   g_reports_other++; break;
+    }
+}
+
+FunctionSlot<DualsenseGamepadOutputReportData> outputSlot(OnOutputReport);
+
 // --- I2S setup + drain --------------------------------------------------
 
 static void setupI2S()
@@ -198,10 +227,15 @@ static void emitStatsIfDue()
     uint32_t now = millis();
     if (now - last_stats_ms < 5000) return;
     last_stats_ms = now;
-    Serial.printf("[stats] pushed=%u overflow=%u ring_used=%u\n",
+    Serial.printf("[stats] pushed=%u overflow=%u ring_used=%u | reports: 0x02=%u 0x31=%u 0x32=%u 0x36=%u other=%u\n",
                   (unsigned)g_pushed_frames,
                   (unsigned)g_overflow_frames,
-                  (unsigned)ring_used_frames());
+                  (unsigned)ring_used_frames(),
+                  (unsigned)g_reports_0x02,
+                  (unsigned)g_reports_0x31,
+                  (unsigned)g_reports_0x32,
+                  (unsigned)g_reports_0x36,
+                  (unsigned)g_reports_other);
 }
 
 // Sample the latest sample value at ~50 Hz and threshold it: positive
@@ -226,7 +260,7 @@ static void updateLEDIfDue()
 void setup()
 {
     Serial.begin(115200);
-    delay(200);
+    delay(1000);
     Serial.println();
     Serial.println("=== DualSense Haptic I2S ===");
 
@@ -241,12 +275,28 @@ void setup()
 
     dualsense = new DualsenseGamepadDevice(config);
     dualsense->onHapticAudioReceived.attach(hapticSlot);
+    dualsense->onReceivedOutputReport.attach(outputSlot);
 
     compositeHID.addDevice(dualsense);
     compositeHID.begin(config->getIdealHostConfiguration());
 
     Serial.println("Advertising. Pair from a Linux host and feed haptics");
     Serial.println("with scripts/ds-haptic-probe.py --pattern sine.");
+
+    // Wait for the host to bind, then announce calibration/firmware/pairing
+    // feature reports. Hosts that key off these (e.g. the Unreal-Dualsense
+    // plugin) treat a controller that never advertises them as not-yet-
+    // initialized and will mark it disconnected even while BLE is up. Mirrors
+    // Dualsense_Edge_Controller.ino's post-connect block.
+    while (!compositeHID.isConnected()) {
+        delay(100);
+    }
+    delay(280);
+
+    dualsense->sendPairingInfoReport();
+    dualsense->sendFirmInfoReport();
+    dualsense->sendCalibrationReport();
+    dualsense->resetInputs();
 }
 
 void loop()
@@ -256,11 +306,12 @@ void loop()
     emitStatsIfDue();
 
     if (compositeHID.isConnected()) {
-        // Heartbeat input reports keep the host's HID-over-GATT bridge
-        // happy and let it escalate to the full 0x31 output path.
+        // Heartbeat input reports keep the host's HID-over-GATT bridge happy
+        // and let it escalate to the full 0x31 output path. seq() bumps the
+        // sequence counter and sends one report — no extra sendGamepadReport()
+        // call is needed. ~50 Hz matches Dualsense_Edge_Controller.ino.
         dualsense->timestamp();
         dualsense->seq();
-        dualsense->sendGamepadReport();
     }
-    delay(2);
+    delay(20);
 }

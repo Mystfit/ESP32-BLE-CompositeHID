@@ -180,9 +180,15 @@ private:
 struct HapticAudioFrame {
     const int8_t*  samples           = nullptr;  // interleaved L R L R ...
     size_t         sampleCount       = 0;        // per-channel; total bytes = sampleCount * 2
-    uint8_t        audioControlBits  = 0;        // mirrors output report audio_control
-    uint8_t        audioControl2Bits = 0;        // mirrors output report audio_control2
+    uint8_t        audioControlBits  = 0;        // mirrors output report audio_control (0x31-source only)
+    uint8_t        audioControl2Bits = 0;        // mirrors output report audio_control2 (0x31-source only)
     uint8_t        seq               = 0;        // upper nibble of seq_tag
+
+    // 0x32 sub-packet 0x11 fields (zero for 0x31-source frames). controlCounter
+    // is the haptic engine's frame counter — increments per packet on the host
+    // side; useful for drop / reorder detection.
+    uint8_t        controlEnable     = 0;        // 0x11 sub-packet byte 0 (typically 0xFE)
+    uint8_t        controlCounter    = 0;        // 0x11 sub-packet byte 6
 };
 
 // DualSense BT Output Report parsed view (wire format is 78 bytes).
@@ -241,9 +247,19 @@ struct DualsenseGamepadOutputReportData {
     // valid for the duration of the onReceivedOutputReport callback.
     // common_offset_used is the offset into raw_data where the 47-byte
     // common section begins (selected by load() based on wire format).
+    // For report 0x32 (haptic-audio sub-protocol), there is no common
+    // section: common_offset_used is set to -1 as a sentinel.
     const uint8_t* raw_data            = nullptr;
     size_t         raw_size            = 0;
     int            common_offset_used  = 0;
+
+    // Sub-packet pointers populated by load() when parsing report 0x32.
+    // Both nullptr for any other report ID. Pointers borrowed from raw_data
+    // and only valid for the lifetime of the onReceivedOutputReport callback.
+    const uint8_t* haptic_pkt12_data   = nullptr;  // 0x12 sub-packet payload (audio bytes, int8 stereo)
+    size_t         haptic_pkt12_length = 0;        // bytes (typically 64 = 32 stereo frames)
+    const uint8_t* haptic_pkt11_data   = nullptr;  // 0x11 sub-packet payload (control / engine state)
+    size_t         haptic_pkt11_length = 0;        // bytes (typically 7)
 
     // Decoded view of a Feedback effect (DS_TRIGGER_EFFECT_FEEDBACK, 0x21).
     // Wire encoding:
@@ -671,6 +687,12 @@ struct DualsenseGamepadOutputReportData {
 
     bool hasHapticAudio() const {
         if (!raw_data) return false;
+        // Report 0x32 / 0x36: haptic samples live in the parsed 0x12 sub-packet,
+        // not in a fixed window. Both formats use the same sub-packet framing.
+        if (report_id == 0x32 || report_id == 0x36) {
+            return haptic_pkt12_data != nullptr && haptic_pkt12_length >= 2;
+        }
+        // Report 0x31 / 0x02: 24-byte window after the 47-byte common section.
         const size_t need = (size_t)common_offset_used
                           + DS_COMMON_SECTION_BYTES
                           + DS_HAPTIC_WINDOW_BYTES;
@@ -682,6 +704,24 @@ struct DualsenseGamepadOutputReportData {
     HapticAudioFrame hapticAudio() const {
         HapticAudioFrame f;
         if (!hasHapticAudio()) return f;
+
+        if (report_id == 0x32 || report_id == 0x36) {
+            // Sub-packet 0x12 carries int8 stereo samples; sampleCount is the
+            // per-channel frame count (32 stereo frames for the canonical
+            // 64-byte payload, but variable in principle). Same framing for
+            // both 0x32 (142-byte buffer) and 0x36 (398-byte buffer).
+            f.samples     = reinterpret_cast<const int8_t*>(haptic_pkt12_data);
+            f.sampleCount = haptic_pkt12_length / 2;
+            f.seq         = (seq_tag >> 4) & 0x0F;
+            // audio_control / audio_control2 don't apply here — leave at 0.
+            if (haptic_pkt11_data && haptic_pkt11_length >= 7) {
+                f.controlEnable  = haptic_pkt11_data[0];
+                f.controlCounter = haptic_pkt11_data[6];
+            }
+            return f;
+        }
+
+        // 0x31 / 0x02 path — fixed 24-byte window after the common section.
         const size_t window_start = (size_t)common_offset_used + DS_COMMON_SECTION_BYTES;
         f.samples           = reinterpret_cast<const int8_t*>(raw_data + window_start);
         f.sampleCount       = DS_HAPTIC_FRAMES_PER_PKT;
@@ -731,8 +771,44 @@ struct DualsenseGamepadOutputReportData {
     // default constructor OK
     DualsenseGamepadOutputReportData() = default;
 
+    // Walk the report-0x32 sub-packet stream starting at byte 2 (after
+    // report_id and seq_tag). Stops at end-of-buffer minus 4 (CRC trailer)
+    // or at the first malformed packet. Bounds-checked: a truncated or
+    // mismatched-length report cannot OOB-read.
+    //
+    // Sub-packet header byte: pid (low 6 bits) | unk (bit 6) | sized (bit 7).
+    // We only handle sized packets (length byte follows the header).
+    void parseReport0x32SubPackets(const uint8_t* value, size_t size)
+    {
+        haptic_pkt12_data   = nullptr;
+        haptic_pkt12_length = 0;
+        haptic_pkt11_data   = nullptr;
+        haptic_pkt11_length = 0;
+        if (size < 2 + 4) return;
+        const size_t end = size - 4;  // leave room for CRC32 trailer
+        size_t off = 2;
+        while (off + 1 < end) {
+            uint8_t header = value[off++];
+            uint8_t pid    = header & 0x3F;
+            bool    sized  = (header >> 7) & 0x01;
+            if (!sized) break;  // unsized packets unsupported; abort walk
+            uint8_t length = value[off++];
+            if (off + length > end) break;  // truncated: stop walking
+            const uint8_t* data = value + off;
+            if (pid == 0x12) {
+                haptic_pkt12_data   = data;
+                haptic_pkt12_length = length;
+            } else if (pid == 0x11) {
+                haptic_pkt11_data   = data;
+                haptic_pkt11_length = length;
+            }
+            off += length;
+        }
+    }
+
     // parsing function - reads from raw BLE output report bytes
     // Handles multiple formats:
+    // - 142 bytes: report 0x32 (haptic-audio sub-protocol) - SAxense / soundsense
     // - 78 bytes: Full BLE report (report_id=0x31 + seq_tag + tag + common)
     // - 77 bytes: USB-over-BLE (seq + common) - DSX sends this format
     //            OR BLE report with report_id stripped (seq_tag + tag + common)
@@ -742,7 +818,27 @@ struct DualsenseGamepadOutputReportData {
     // DSX 77-byte format: [seq 0x00-0x0F] [valid_flag0] [valid_flag1] [motor_r] [motor_l] ...
     bool load(const uint8_t* value, size_t size)
     {
-        if (!value || size < 47)  // Minimum: common section is 47 bytes
+        if (!value) return false;
+
+        // Report 0x32 / 0x36 (haptic-audio sub-protocol). No common section —
+        // bail out after parsing sub-packets so the rest of this function
+        // doesn't try to interpret the bytes as common-format fields.
+        // 0x32 is the original 142-byte variant (SAxense / soundsense / older
+        // Unreal-Dualsense). 0x36 is the larger 398-byte variant emitted by
+        // recent Unreal-Dualsense builds; it uses the same 0x11/0x12 sub-packet
+        // framing in a wider buffer, so the same walker handles both.
+        if (size >= 12 && (value[0] == 0x32 || value[0] == 0x36)) {
+            report_id          = value[0];
+            seq_tag            = value[1];
+            tag                = 0;
+            raw_data           = value;
+            raw_size           = size;
+            common_offset_used = -1;  // sentinel: no common section
+            parseReport0x32SubPackets(value, size);
+            return true;
+        }
+
+        if (size < 47)  // Minimum: common section is 47 bytes
             return false;
 
         int common_offset = 0;  // Offset to start of common section

@@ -1,70 +1,55 @@
 #!/usr/bin/env python3
 """
-ds-haptic-probe.py — Linux protocol-oracle probe for haptic-audio support.
+ds-haptic-probe-win.py — Windows protocol-oracle probe for haptic-audio support.
 
-Writes synthetic 78-byte 0x31 BT output reports to a paired emulated DualSense
-(ESP32 flashed with examples/dualsenseExamples/Dualsense_Haptic_Sniffer) so we
-can determine, independent of any host stack (Windows/DSX/Steam/etc.),
-whether the BLE GATT output-report path carries arbitrary bytes through to
-our firmware. Linux is used because /dev/hidraw lets userspace write raw HID
-output reports; this is the same path SAxense uses against a real DualSense.
+Sibling of ds-haptic-probe.py. Same byte layout, same CLI, same patterns —
+but uses HIDAPI userspace HID writes instead of /dev/hidraw, so it runs on
+Windows (and on Linux too, against the same ESP32, for cross-validation).
 
-What the test answers
----------------------
-Background: the existing project note in
-  examples/dualsenseExamples/Dualsense_Edge_Controller/Dualsense_Edge_Controller.ino
-states that VCA haptic audio rides Bluetooth Classic HID and "does not reach
-BLE HoGP peripherals." A DSX-on-Windows capture confirmed: zero output-report
-mutation reaches the firmware. That tells us about the *Windows host stack*,
-not about the BLE pipe itself.
+What this answers
+-----------------
+The Linux probe proved the BLE 0x31 pipe carries arbitrary haptic bytes when
+the host is /dev/hidraw on BlueZ. This script asks the same question of
+Windows: does the Windows HID stack pass 0x31 output reports through to a
+BLE HoGP peripheral and into the firmware's 24-byte haptic window?
 
-This script tests the pipe directly: it writes known patterns into a
-configurable byte window of the 0x31 output report at a configurable rate.
-The Dualsense_Haptic_Sniffer firmware on the ESP32 will print `diff>0` lines
-and stats showing exactly which reports arrived and how many bytes mutated.
-If the pipe carries the bytes, we see them — and we know the limit was the
-host stack, not the transport.
+DSX cannot answer this — DSX delivers haptics via USB Audio Class on Windows,
+not HID. Most native-DualSense games and Steam Input *do* write 0x31 raw, so
+proving the transport here is a foundation for everything that follows.
 
 Usage
 -----
-    sudo python3 ds-haptic-probe.py [--device /dev/hidrawN]
-                                    [--rate-hz 50] [--duration 5]
-                                    [--pattern counter|sine|constant]
-                                    [--offset N] [--length L] [--value V]
-                                    [--no-crc]
+    pip install hidapi          # (or: pip install hid)
+    python ds-haptic-probe-win.py [--device <hidapi-path>]
+                                  [--rate-hz 50] [--duration 5]
+                                  [--pattern counter|sine|constant]
+                                  [--offset N] [--length L] [--value V]
+                                  [--no-crc]
 
 Pairing prereq: ESP32 flashed with the haptic sniffer sketch and paired via
-bluetoothctl. Watch the ESP32 serial monitor (115200 baud) while running.
+Settings -> Bluetooth -> "Wireless Controller". Watch the ESP32 serial
+monitor (115200 baud) while running.
 
 Notes
 -----
-* 0x31 BT output report layout (mirrors firmware DualsenseGamepadOutputReportData
-  / Linux dualsense_output_report_bt):
-    byte  0       : report_id  = 0x31
-    byte  1       : seq_tag    (upper 4 bits = seq, lower 4 = tag)
-    byte  2       : tag        = 0x10
-    bytes 3..49   : 47-byte common section (motors, audio control, triggers,
-                    timestamp, valid_flag2, lightbar, etc.)
-    bytes 50..73  : 24-byte reserved region — the most plausible window for
-                    haptic-audio bytes given the wire size; default probe
-                    target.
-    bytes 74..77  : CRC32 (LE) over the preceding 78 - 4 bytes, prepended
-                    with the SEED byte 0xA2 (per Sony BT HID convention).
-* For the byte window probe, the firmware does not currently validate CRC on
-  output reports, so --no-crc is fine for transport-only testing. Compute
-  CRC anyway by default to mirror what a real driver would send.
+Byte layout, CRC seed, and the 24-byte haptic window mirror the Linux probe.
+See ds-haptic-probe.py for the per-byte breakdown of the 78-byte 0x31 BT
+output report. The first byte of the buffer we hand to hidapi is the report
+ID (0x31), which is what hidapi's `device.write()` expects on Windows.
 """
 
 import argparse
-import glob
 import math
-import os
-import re
 import struct
 import sys
 import time
 import zlib
 from typing import Optional
+
+try:
+    import hid
+except ImportError:
+    sys.exit("missing 'hid' module. install with:  pip install hidapi")
 
 DS_REPORT_ID_BT  = 0x31
 DS_OUTPUT_TAG    = 0x10
@@ -87,6 +72,9 @@ DS_PKT_AUDIO_LENGTH = 64   # canonical 0x12 sub-packet length (32 stereo frames)
 DS_VID = 0x054C
 DS_PID = 0x0CE6
 
+GAMEPAD_USAGE_PAGE = 0x0001
+GAMEPAD_USAGE      = 0x0005
+
 # valid_flag0 bits (byte 3 of the 78-byte report / common_offset+0 in firmware).
 # Mirrors DS_OUT_FLAG0_* in DualsenseGamepadDevice.h.
 DS_VF0_HAPTICS_SELECT    = 0x02   # bit 1 — enable haptic motor select
@@ -105,47 +93,51 @@ DS_AUDIO_CTRL_INTERNAL_SPEAKER = 0x10
 # Device discovery
 # ---------------------------------------------------------------------------
 
-def _read_id(sysfs_path: str) -> Optional[str]:
-    try:
-        with open(sysfs_path, "r") as fh:
-            return fh.read().strip()
-    except OSError:
-        return None
-
-
-def list_hidraw_candidates() -> list:
-    """Return [(/dev/hidrawN, HID_ID string, HID_NAME string), ...] for every
-    hidraw node currently visible. Used both for auto-detect and for failure
-    diagnostics so the user can see exactly what BlueZ exposed."""
+def list_hid_candidates() -> list:
+    """Return every HID interface hidapi can see, with the bits we care about
+    for diagnostic output. Includes all VID/PID pairs, not just Sony, so the
+    user can see what Windows actually exposed if our match fails."""
     out = []
-    for node in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent")):
-        text = _read_id(node) or ""
-        hid_id = ""
-        hid_name = ""
-        for line in text.splitlines():
-            if line.startswith("HID_ID="):
-                hid_id = line[len("HID_ID="):]
-            elif line.startswith("HID_NAME="):
-                hid_name = line[len("HID_NAME="):]
-        name = node.split("/")[-3]  # hidrawN
-        out.append((f"/dev/{name}", hid_id, hid_name))
+    for entry in hid.enumerate():
+        out.append({
+            "path":         entry.get("path", b""),
+            "vendor_id":    entry.get("vendor_id", 0),
+            "product_id":   entry.get("product_id", 0),
+            "usage_page":   entry.get("usage_page", 0),
+            "usage":        entry.get("usage", 0),
+            "product":      entry.get("product_string", "") or "",
+            "manufacturer": entry.get("manufacturer_string", "") or "",
+        })
     return out
 
 
-def find_hidraw_for_dualsense() -> Optional[str]:
-    """Return /dev/hidrawN for the first node whose modalias matches Sony DS."""
-    for dev, hid_id, _ in list_hidraw_candidates():
-        m = re.search(r"\w+:0*([0-9A-Fa-f]+):0*([0-9A-Fa-f]+)", hid_id)
-        if not m:
-            continue
-        vid, pid = int(m.group(1), 16), int(m.group(2), 16)
-        if vid == DS_VID and pid == DS_PID:
-            return dev
-    return None
+def find_hid_path_for_dualsense() -> Optional[bytes]:
+    """Pick the HID interface with VID/PID matching Sony DualSense. On BLE
+    HoGP, Windows typically exposes one HID interface; prefer the Game Pad
+    usage if multiple exist (e.g. composite descriptors)."""
+    matches = [c for c in list_hid_candidates()
+               if c["vendor_id"] == DS_VID and c["product_id"] == DS_PID]
+    if not matches:
+        return None
+    for c in matches:
+        if c["usage_page"] == GAMEPAD_USAGE_PAGE and c["usage"] == GAMEPAD_USAGE:
+            return c["path"]
+    return matches[0]["path"]
+
+
+def _path_str(p) -> str:
+    """hidapi paths are bytes on Linux, str on Windows depending on backend.
+    Render uniformly for prints."""
+    if isinstance(p, bytes):
+        try:
+            return p.decode("utf-8", errors="replace")
+        except Exception:
+            return repr(p)
+    return str(p)
 
 
 # ---------------------------------------------------------------------------
-# Report construction
+# Report construction (lifted verbatim from ds-haptic-probe.py)
 # ---------------------------------------------------------------------------
 
 def crc32_with_seed(buf: bytes, seed_byte: int) -> int:
@@ -218,7 +210,7 @@ def build_report(payload_bytes: bytes,
 
     buf = bytearray(DS_REPORT_LEN_BT)
     buf[0]  = DS_REPORT_ID_BT
-    buf[1]  = ((seq & 0x0F) << 4) | 0x00      # upper nibble seq, lower tag
+    buf[1]  = ((seq & 0x0F) << 4) | 0x00
     buf[2]  = DS_OUTPUT_TAG
     buf[3]  = valid_flag0 & 0xFF
     buf[10] = audio_control & 0xFF
@@ -231,17 +223,14 @@ def build_report(payload_bytes: bytes,
 
 
 # ---------------------------------------------------------------------------
-# Pattern generators
+# Pattern generators (lifted verbatim from ds-haptic-probe.py)
 # ---------------------------------------------------------------------------
 
 def gen_counter(length: int, step: int) -> bytes:
-    """One byte of counter, replicated to `length` bytes."""
     return bytes([(step & 0xFF)] * length)
 
 
 def gen_sine(length: int, step: int, sample_rate_hz: float, freq_hz: float) -> bytes:
-    """`length` 8-bit signed PCM samples of a sine at `freq_hz`, taken from a
-    continuous oscillator advanced by `length` samples per call."""
     out = bytearray(length)
     base_phase = (step * length) / sample_rate_hz
     for i in range(length):
@@ -262,7 +251,8 @@ def gen_constant(length: int, value: int) -> bytes:
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--device", help="hidraw node (default: auto-detect Sony DS)")
+    ap.add_argument("--device",
+                    help="hidapi device path (default: auto-detect Sony DS by VID/PID)")
     ap.add_argument("--report", type=lambda s: int(s, 0), default=DS_REPORT_ID_BT,
                     help="output report ID to write: 0x31 (default; 78-byte BT report "
                          "with 24-byte reserved-region haptic window) or 0x32 "
@@ -274,10 +264,10 @@ def main():
                     help="seconds to run; 0 = run until Ctrl-C (default: 5)")
     ap.add_argument("--pattern", choices=("counter", "sine", "constant"),
                     default="counter",
-                    help="payload pattern (default: counter — most diagnosable)")
+                    help="payload pattern (default: counter -- most diagnosable)")
     ap.add_argument("--offset", type=int, default=None,
                     help="byte offset within the report (default: 50 for 0x31, "
-                         "13 for 0x32 — the start of each report's haptic payload)")
+                         "13 for 0x32 -- the start of each report's haptic payload)")
     ap.add_argument("--length", type=int, default=None,
                     help="payload length in bytes (default: 24 for 0x31, 64 for 0x32)")
     ap.add_argument("--value", type=lambda s: int(s, 0), default=0xAA,
@@ -309,32 +299,35 @@ def main():
         if args.offset is None: args.offset = 50
         if args.length is None: args.length = 24
 
-    device = args.device or find_hidraw_for_dualsense()
-    if not device:
-        candidates = list_hidraw_candidates()
-        if not candidates:
-            sys.exit("no /dev/hidraw* nodes exist at all. BlueZ's HID-over-GATT "
-                     "bridge probably didn't claim the controller. Try:\n"
-                     "  sudo modprobe uhid\n"
-                     "  bluetoothctl> disconnect <MAC>; connect <MAC>\n"
-                     "Then re-run this script.")
-        print("no hidraw node matched Sony DualSense (054C:0CE6).", file=sys.stderr)
-        print("hidraw nodes currently visible:", file=sys.stderr)
-        for dev, hid_id, hid_name in candidates:
-            print(f"  {dev}  HID_ID={hid_id or '(none)'}  HID_NAME={hid_name or '(none)'}",
-                  file=sys.stderr)
-        sys.exit("if one of these is your ESP32, re-run with --device <path>; "
-                 "BlueZ on some kernel versions doesn't propagate the descriptor "
-                 "VID/PID into the hidraw uevent for HoGP devices.")
-    print(f"using {device}")
+    if args.device is not None:
+        path_arg = args.device
+        device_path = path_arg.encode("utf-8") if isinstance(path_arg, str) else path_arg
+    else:
+        device_path = find_hid_path_for_dualsense()
 
-    interval = 1.0 / args.rate_hz
-    end_at = (time.monotonic() + args.duration) if args.duration > 0 else None
+    if not device_path:
+        candidates = list_hid_candidates()
+        if not candidates:
+            sys.exit("hidapi reports zero HID devices. Is the ESP32 paired and "
+                     "connected? Settings -> Bluetooth -> 'Wireless Controller' "
+                     "should show as Connected. Try unpair/repair if it's not.")
+        print("no HID interface matched Sony DualSense (054C:0CE6).", file=sys.stderr)
+        print("HID interfaces hidapi currently sees:", file=sys.stderr)
+        for c in candidates:
+            print(f"  VID:{c['vendor_id']:04X} PID:{c['product_id']:04X} "
+                  f"UP:{c['usage_page']:04X} U:{c['usage']:04X}  "
+                  f"{c['manufacturer']!r} / {c['product']!r}",
+                  file=sys.stderr)
+            print(f"    path: {_path_str(c['path'])}", file=sys.stderr)
+        sys.exit("if one of these is your ESP32, re-run with --device <path>.")
+
+    print(f"using {_path_str(device_path)}")
 
     try:
-        fd = os.open(device, os.O_WRONLY)
-    except OSError as e:
-        sys.exit(f"open({device}): {e} (try sudo)")
+        dev = hid.device()
+        dev.open_path(device_path)
+    except (OSError, IOError) as e:
+        sys.exit(f"open_path failed: {e}")
 
     print(f"writing report 0x{args.report:02X}, {args.pattern} pattern at "
           f"offset={args.offset} length={args.length} rate={args.rate_hz} Hz "
@@ -342,8 +335,11 @@ def main():
     print("watch the ESP32 serial monitor; sniffer's [stats] line should "
           "report diff>0 for these writes")
 
+    interval = 1.0 / args.rate_hz
+    end_at = (time.monotonic() + args.duration) if args.duration > 0 else None
     sent = 0
     next_t = time.monotonic()
+
     try:
         while True:
             if end_at and time.monotonic() >= end_at:
@@ -354,7 +350,7 @@ def main():
             elif args.pattern == "sine":
                 payload = gen_sine(args.length, sent,
                                    args.sine_srate, args.sine_freq)
-            else:  # constant
+            else:
                 payload = gen_constant(args.length, args.value)
 
             if args.report == DS_REPORT_ID_32:
@@ -367,7 +363,11 @@ def main():
                                       valid_flag0=args.vf0,
                                       audio_control=args.audio_ctrl,
                                       audio_control2=args.audio_ctrl2)
-            n = os.write(fd, report)
+            try:
+                n = dev.write(report)
+            except (OSError, IOError) as e:
+                print(f"write failed after {sent} reports: {e}", file=sys.stderr)
+                break
             if n != len(report):
                 print(f"short write: {n}/{len(report)}", file=sys.stderr)
             sent += 1
@@ -380,12 +380,14 @@ def main():
             if sleep_for > 0:
                 time.sleep(sleep_for)
             else:
-                # Falling behind — reset baseline so we don't spiral.
                 next_t = time.monotonic()
     except KeyboardInterrupt:
         pass
     finally:
-        os.close(fd)
+        try:
+            dev.close()
+        except Exception:
+            pass
         print(f"done. wrote {sent} reports.")
 
 

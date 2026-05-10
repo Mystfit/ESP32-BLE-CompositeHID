@@ -166,6 +166,15 @@ Credits to [wakwak-koba](https://github.com/wakwak-koba) for NimBLE [code](https
 
 Credits to [YeaSeb](https://github.com/YeaSeb) for contributing DualSense controller support.
 
+## Credits for DualSense haptic-audio sub-protocol (report 0x32)
+
+The implementation of the DualSense haptic-audio sub-protocol (output report 0x32 — sub-packets 0x11 control and 0x12 audio) was informed by the following open-source references:
+
+- [egormanga/SAxense](https://github.com/egormanga/SAxense) — proof-of-concept that pipes 8-bit PCM audio into a real DualSense via `/dev/hidraw` on Linux; confirmed the 142-byte report size and sub-packet structure.
+- [kijimad/soundsense](https://github.com/kijimad/soundsense) — Go implementation of the haptic-audio protocol over Bluetooth Classic; used as the byte-for-byte reference for the 0x32 report layout (sub-packet headers, CRC32 seed `0xA2`, and field positions).
+- [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle) — Raspberry Pi Pico2W USB↔BT-Classic bridge for real DualSense controllers; explained why haptic audio on Windows requires USB Audio Class (UAC1) and is unavailable over BLE HoGP.
+- [rafaelvaloto/Unreal-Dualsense](https://github.com/rafaelvaloto/Unreal-Dualsense) — Dualsense Unreal Plugin; Helped to flesh out the 0x36 report ID and used to test haptic support.
+
 
 You might also be interested in:
 - [ESP32-BLE-Mouse](https://github.com/T-vK/ESP32-BLE-Mouse)
