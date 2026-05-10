@@ -319,8 +319,8 @@ void DualsenseGamepadDevice::resetInputs()
     _inputReport.buttons[2] = 0;
     hat_set(_inputReport.buttons, DUALSENSE_BUTTON_DPAD_NONE);
     _inputReport.extra_buttons = 0;
-    _inputReport.touchpoint_l_contact = 0x80;
-    _inputReport.touchpoint_r_contact = 0x80;
+    _inputReport.touchpoint_0_contact = 0x80;
+    _inputReport.touchpoint_1_contact = 0x80;
     _inputReport.timestamp = 0x7621DD40;
     _inputReport.status = 0x0A;  // 100% battery, discharging
 
@@ -348,42 +348,81 @@ void DualsenseGamepadDevice::press(uint32_t button)
         }
     }
 }
-void DualsenseGamepadDevice::setLeftTouchpad(uint16_t x, uint16_t y)
+int8_t DualsenseGamepadDevice::touchpadStartTouch(uint16_t x, uint16_t y)
 {
-
-    if (_inputReport.touchpoint_l_contact != 0x00) {
+    int8_t slotIndex = -1;
+    {
         std::lock_guard<std::mutex> lock(_mutex);
-        _inputReport.touchpoint_l_contact = 0x00;
-    }
-    _inputReport.touchpoint_l_x = x & 0xFFF;
-    _inputReport.touchpoint_l_y = y & 0xFFF;
-    if (_config->getAutoReport()) {
-        sendGamepadReport();
-    }
-}
-void DualsenseGamepadDevice::setRightTouchpad(uint16_t x, uint16_t y)
-{
+        for (int i = 0; i < 2; i++) {
+            if (!_touchPointActive[i]) {
+                slotIndex = (int8_t)i;
+                break;
+            }
+        }
+        if (slotIndex < 0) {
+            return -1;
+        }
 
-    if (_inputReport.touchpoint_r_contact != 0x00) {
+        _touchPointActive[slotIndex] = true;
+        _touchPointId[slotIndex] = _nextTouchId;
+        _nextTouchId = (_nextTouchId + 1) & 0x7F;
+
+        // Contact byte: bit 7 = 0 (active), bits 0-6 = touch ID
+        uint8_t contact = _touchPointId[slotIndex] & 0x7F;
+        if (slotIndex == 0) {
+            _inputReport.touchpoint_0_contact = contact;
+            _inputReport.touchpoint_0_x = x & 0xFFF;
+            _inputReport.touchpoint_0_y = y & 0xFFF;
+        } else {
+            _inputReport.touchpoint_1_contact = contact;
+            _inputReport.touchpoint_1_x = x & 0xFFF;
+            _inputReport.touchpoint_1_y = y & 0xFFF;
+        }
+    }
+
+    if (_config->getAutoReport()) {
+        sendGamepadReport();
+    }
+
+    return slotIndex;
+}
+
+void DualsenseGamepadDevice::touchpadUpdatePosition(uint16_t x, uint16_t y, uint8_t touchpointId)
+{
+    if (touchpointId >= 2) return;
+
+    {
         std::lock_guard<std::mutex> lock(_mutex);
-        _inputReport.touchpoint_r_contact = 0x00;
+        if (!_touchPointActive[touchpointId]) return;
+        if (touchpointId == 0) {
+            _inputReport.touchpoint_0_x = x & 0xFFF;
+            _inputReport.touchpoint_0_y = y & 0xFFF;
+        } else {
+            _inputReport.touchpoint_1_x = x & 0xFFF;
+            _inputReport.touchpoint_1_y = y & 0xFFF;
+        }
     }
-    _inputReport.touchpoint_r_x = x & 0xFFF;
-    _inputReport.touchpoint_r_y = y & 0xFFF;
+
     if (_config->getAutoReport()) {
         sendGamepadReport();
     }
 }
-void DualsenseGamepadDevice::releaseLeftTouchpad()
+
+void DualsenseGamepadDevice::touchpadStopTouch(uint8_t touchpointId)
 {
-    _inputReport.touchpoint_l_contact = 0x80;
-    if (_config->getAutoReport()) {
-        sendGamepadReport();
+    if (touchpointId >= 2) return;
+
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_touchPointActive[touchpointId]) return;
+        _touchPointActive[touchpointId] = false;
+        if (touchpointId == 0) {
+            _inputReport.touchpoint_0_contact = 0x80;
+        } else {
+            _inputReport.touchpoint_1_contact = 0x80;
+        }
     }
-}
-void DualsenseGamepadDevice::releaseRightTouchpad()
-{
-    _inputReport.touchpoint_r_contact = 0x80;
+
     if (_config->getAutoReport()) {
         sendGamepadReport();
     }
@@ -551,6 +590,101 @@ void DualsenseGamepadDevice::setChargingStatus(bool charging)
             _inputReport.status = newStatus;
         }
 
+        if (_config->getAutoReport()) {
+            sendGamepadReport();
+        }
+    }
+}
+
+void DualsenseGamepadDevice::setL2TriggerFeedback(uint8_t effectFlags, uint8_t position, uint8_t reserved)
+{
+    if (_inputReport.l2_trigger_feedback[0] != effectFlags ||
+        _inputReport.l2_trigger_feedback[1] != position ||
+        _inputReport.l2_trigger_feedback[2] != reserved) {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _inputReport.l2_trigger_feedback[0] = effectFlags;
+            _inputReport.l2_trigger_feedback[1] = position;
+            _inputReport.l2_trigger_feedback[2] = reserved;
+        }
+        if (_config->getAutoReport()) {
+            sendGamepadReport();
+        }
+    }
+}
+
+void DualsenseGamepadDevice::setR2TriggerFeedback(uint8_t effectFlags, uint8_t position, uint8_t reserved)
+{
+    if (_inputReport.r2_trigger_feedback[0] != effectFlags ||
+        _inputReport.r2_trigger_feedback[1] != position ||
+        _inputReport.r2_trigger_feedback[2] != reserved) {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _inputReport.r2_trigger_feedback[0] = effectFlags;
+            _inputReport.r2_trigger_feedback[1] = position;
+            _inputReport.r2_trigger_feedback[2] = reserved;
+        }
+        if (_config->getAutoReport()) {
+            sendGamepadReport();
+        }
+    }
+}
+
+static uint8_t setStatusBit(uint8_t current, uint8_t mask, bool value)
+{
+    return value ? (current | mask) : (current & ~mask);
+}
+
+void DualsenseGamepadDevice::setHeadphonesPlugged(bool plugged)
+{
+    uint8_t newStatus2 = setStatusBit(_inputReport.status2, DUALSENSE_STATUS2_HEADPHONES_PLUGGED, plugged);
+    if (_inputReport.status2 != newStatus2) {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _inputReport.status2 = newStatus2;
+        }
+        if (_config->getAutoReport()) {
+            sendGamepadReport();
+        }
+    }
+}
+
+void DualsenseGamepadDevice::setHeadphoneMic(bool connected)
+{
+    uint8_t newStatus2 = setStatusBit(_inputReport.status2, DUALSENSE_STATUS2_HEADPHONE_MIC, connected);
+    if (_inputReport.status2 != newStatus2) {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _inputReport.status2 = newStatus2;
+        }
+        if (_config->getAutoReport()) {
+            sendGamepadReport();
+        }
+    }
+}
+
+void DualsenseGamepadDevice::setMuteActive(bool active)
+{
+    uint8_t newStatus2 = setStatusBit(_inputReport.status2, DUALSENSE_STATUS2_MUTE_ACTIVE, active);
+    if (_inputReport.status2 != newStatus2) {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _inputReport.status2 = newStatus2;
+        }
+        if (_config->getAutoReport()) {
+            sendGamepadReport();
+        }
+    }
+}
+
+void DualsenseGamepadDevice::setUsbPlugged(bool plugged)
+{
+    uint8_t newStatus2 = setStatusBit(_inputReport.status2, DUALSENSE_STATUS2_USB_PLUGGED, plugged);
+    if (_inputReport.status2 != newStatus2) {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _inputReport.status2 = newStatus2;
+        }
         if (_config->getAutoReport()) {
             sendGamepadReport();
         }

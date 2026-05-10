@@ -68,6 +68,14 @@ enum DualsenseDpadFlags : uint8_t {
 #define DUALSENSE_CHARGING_MIN 0
 #define DUALSENSE_CHARGING_MAX 15
 
+// Status2 byte (byte 54 of input report) bit masks: peripheral/connection state.
+// From community reverse-engineering of DS5 BT captures; not in Linux hid-playstation.c.
+#define DUALSENSE_STATUS2_HEADPHONES_PLUGGED (1 << 0)  // 3.5 mm headset jack occupied
+#define DUALSENSE_STATUS2_HEADPHONE_MIC      (1 << 1)  // headset has an inline microphone
+#define DUALSENSE_STATUS2_MUTE_ACTIVE        (1 << 2)  // mute button is currently engaged
+#define DUALSENSE_STATUS2_USB_PLUGGED        (1 << 4)  // USB data cable connected
+#define DUALSENSE_STATUS2_HAPTICS_INIT       (1 << 7)  // haptic subsystem initialised
+
 // Thumbstick range
 #define DUALSENSE_STICK_MIN -127
 #define DUALSENSE_STICK_MAX 127
@@ -168,18 +176,18 @@ struct DualsenseGamepadOutputReportData {
     uint8_t tag = 0;                // Byte 2: Should be 0x10 (DS_OUTPUT_TAG)
 
     // Common section starts at byte 3 (47 bytes)
-    uint8_t valid_flag0 = 0;        // Byte 3
-    uint8_t valid_flag1 = 0;        // Byte 4
+    uint8_t valid_flag0 = 0;        // Byte 3: see DS_OUT_FLAG0_* masks
+    uint8_t valid_flag1 = 0;        // Byte 4: see DS_OUT_FLAG1_* masks
     uint8_t motor_right = 0;        // Byte 5: Strong motor
     uint8_t motor_left = 0;         // Byte 6: Weak motor
 
     uint8_t headphone_volume = 0;   // Byte 7
     uint8_t speaker_volume = 0;     // Byte 8
     uint8_t mic_volume = 0;         // Byte 9
-    uint8_t audio_control = 0;      // Byte 10
-    uint8_t mute_button_led = 0;    // Byte 11
+    uint8_t audio_control = 0;      // Byte 10: audio routing flags (bit 0=headphone out, bit 1=speaker out, bit 4=internal mic)
+    uint8_t mute_button_led = 0;    // Byte 11: 0x00=off, 0x01=solid on, 0x02=pulsing
 
-    uint8_t power_save_control = 0; // Byte 12
+    uint8_t power_save_control = 0; // Byte 12: bit 4 (0x10) = disable internal mic to save power
 
     // Adaptive-trigger effect blocks (canonical layout from hid-playstation.c).
     // Each trigger has 1 mode byte + 10 parameter bytes. For DS_TRIGGER_EFFECT_VIBRATION
@@ -193,11 +201,11 @@ struct DualsenseGamepadOutputReportData {
 
     uint8_t audio_control2 = 0;     // Byte 40
 
-    uint8_t valid_flag2 = 0;        // Byte 41
+    uint8_t valid_flag2 = 0;        // Byte 41: see DS_OUT_FLAG2_* masks
     uint8_t reserved3[2] = { 0 };   // Bytes 42-43
 
-    uint8_t lightbar_setup = 0;     // Byte 44
-    uint8_t led_brightness = 0;     // Byte 45
+    uint8_t lightbar_setup = 0;     // Byte 44: 0x01=lightbar on (apply RGB), 0x02=lightbar off/fade out
+    uint8_t led_brightness = 0;     // Byte 45: 0=high, 1=medium, 2=low
     uint8_t player_leds = 0;        // Byte 46
     uint8_t lightbar_red = 0;       // Byte 47
     uint8_t lightbar_green = 0;     // Byte 48
@@ -812,20 +820,28 @@ struct DualsenseGamepadInputReportData {
     int16_t accel_z = 0;            // bytes 26-27
     uint32_t timestamp = 0x7621DD40;// bytes 28-31: sensor timestamp
     uint8_t reserved2 = 0;          // byte 32
-    uint8_t touchpoint_l_contact = 0x80;  // byte 33 (0x80 = no contact)
-    uint16_t touchpoint_l_x : 12;   // bytes 34-35 (low 12 bits across two bytes, packed with y)
-    uint16_t touchpoint_l_y : 12;   // byte 36 (high 12 bits)
-    uint8_t touchpoint_r_contact = 0x80;  // byte 37
-    uint16_t touchpoint_r_x : 12;   // bytes 38-39
-    uint16_t touchpoint_r_y : 12;   // byte 40
-    uint8_t data_41_53[12];         // bytes 41-52
+    uint8_t touchpoint_0_contact = 0x80;  // byte 33 (0x80 = no contact)
+    uint16_t touchpoint_0_x : 12;   // bytes 34-35 (low 12 bits across two bytes, packed with y)
+    uint16_t touchpoint_0_y : 12;   // byte 36 (high 12 bits)
+    uint8_t touchpoint_1_contact = 0x80;  // byte 37
+    uint16_t touchpoint_1_x : 12;   // bytes 38-39
+    uint16_t touchpoint_1_y : 12;   // byte 40
+    uint8_t touchpad_timestamp = 0;          // byte 41: touchpad packet counter (increments each report)
+    // bytes 42-44: L2 adaptive trigger state feedback (reported back to host).
+    // [0] bits 0-3: active effect ID; bit 4: trigger currently actuating. [1]: position readback (0-255). [2]: reserved.
+    uint8_t l2_trigger_feedback[3] = {};    // bytes 42-44
+    // bytes 45-47: R2 adaptive trigger state feedback, same layout as l2_trigger_feedback.
+    uint8_t r2_trigger_feedback[3] = {};    // bytes 45-47
+    uint8_t data_48_52[5] = {};             // bytes 48-52: unknown, zero in all known captures
 
     // byte 53: battery/status[0]. Low nibble = capacity 0-10, high nibble = charging state.
     // 0x0A = 100% discharging (normal). 0xFF would read as capacity=15 + charging=0xF (error).
-    uint8_t status = 0x0A;          // byte 53
+    uint8_t status = 0x0A;                  // byte 53
 
-    uint8_t data_54_74[18];         // bytes 54-71
-    uint8_t reserved3 = 0x00;       // byte 72
+    // byte 54: peripheral/connection status. See DUALSENSE_STATUS2_* masks.
+    uint8_t status2 = 0x00;                 // byte 54
+    uint8_t data_55_71[17] = {};            // bytes 55-71: Linux reserved4[10] + BT frame padding[7], zeros
+    uint8_t reserved3 = 0x00;              // byte 72
     uint32_t crc32 = 0;             // bytes 73-76
 } __attribute__((packed));
 
@@ -919,14 +935,22 @@ public:
     bool isDPadPressedFlag(DualsenseDpadFlags direction);
     void pressShare();
     void releaseShare();
-    void setLeftTouchpad(uint16_t x, uint16_t y);
-    void setRightTouchpad(uint16_t x, uint16_t y);
-    void releaseLeftTouchpad();
-    void releaseRightTouchpad();
+    int8_t touchpadStartTouch(uint16_t x, uint16_t y);
+    void touchpadUpdatePosition(uint16_t x, uint16_t y, uint8_t touchpointId);
+    void touchpadStopTouch(uint8_t touchpointId);
     void setAccel(int16_t x, int16_t y, int16_t z);
     void setGyro(int16_t pitch, int16_t yaw, int16_t roll);
     void setBatteryLevel(uint8_t level);
     void setChargingStatus(bool charging);
+    // effectFlags (community RE, not in Linux driver): bits 0-3 = active effect type
+    //   (0=none, 1=feedback/resistance, 2=weapon snap, 6=vibration); bit 4 = trigger in active zone.
+    // position: actuator readback 0-255. Host does not use these for gameplay; zeros are safe.
+    void setL2TriggerFeedback(uint8_t effectFlags, uint8_t position, uint8_t reserved = 0);
+    void setR2TriggerFeedback(uint8_t effectFlags, uint8_t position, uint8_t reserved = 0);
+    void setHeadphonesPlugged(bool plugged);
+    void setHeadphoneMic(bool connected);
+    void setMuteActive(bool active);
+    void setUsbPlugged(bool plugged);
     void sendGamepadReport(bool defer = false);
     void sendFirmInfoReport(bool defer = false);
     void sendCalibrationReport(bool defer = false);
@@ -967,6 +991,9 @@ private:
     uint32_t crc32_le(unsigned int crc, unsigned char const* buf, unsigned int len);
     void generate_crc_table(uint32_t* crcTable);
     uint32_t* m_pCrcTable;
+    uint8_t _touchPointId[2] = {0};
+    bool _touchPointActive[2] = {false};
+    uint8_t _nextTouchId = 1;
     // Threading
     std::mutex _mutex;
 };

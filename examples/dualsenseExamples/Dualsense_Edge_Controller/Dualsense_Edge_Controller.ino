@@ -271,7 +271,7 @@ void setup()
     dualsense->sendCalibrationReport();
     dualsense->resetInputs();
 
-    Serial.println("Select button/axis to be activated for testing (3 digits in the format 000). 0: Cross 1: Circle  2: Square  3: Triangle \n 4: L1 5: R1 6: L3 7: R3 8: select 9: start 10: Home 11:VolMute \n 12: DPAD u 13: DPAD R 14: DPAD L 15: DPAD D \n 16: L2 17: R2 \n 18:left stick left 19:left stick right 20:left stick down 21:left stick up \n 22:right stick left 23:right stick right 24:right stick down 25:right stick up \n 26: circle joysticks 27: L4 28 : R4 29: L5 30: R5 31: Gyro/Accel 32: Touchpad");
+    Serial.println("Select button/axis to be activated for testing (3 digits in the format 000). 0: Cross 1: Circle  2: Square  3: Triangle \n 4: L1 5: R1 6: L3 7: R3 8: select 9: start 10: Home 11:VolMute \n 12: DPAD u 13: DPAD R 14: DPAD L 15: DPAD D \n 16: L2 17: R2 \n 18:left stick left 19:left stick right 20:left stick down 21:left stick up \n 22:right stick left 23:right stick right 24:right stick down 25:right stick up \n 26: circle joysticks 27: L4 28 : R4 29: L5 30: R5 31: Gyro/Accel 32: Touchpad 33: Battery \n 34: Trigger feedback sweep 35: Status2 flags (headphones/mic/mute/USB)");
 }
 
 void loop()
@@ -518,17 +518,18 @@ void loop()
             case 32: {
                 Serial.println("Sending touchpad movement");
                 delay(200);
-                for (float i = 0; i < TWO_PI; i += STEP) {
-                    dualsense->setLeftTouchpad(cos(i) * 400 + 1000, sin(i) * 400 + 540);
+                float i = 0;
+                int8_t slot = dualsense->touchpadStartTouch(cos(i) * 400 + 1000, sin(i) * 400 + 540);
+                for (i = STEP; i < TWO_PI; i += STEP) {
+                    dualsense->touchpadUpdatePosition(cos(i) * 400 + 1000, sin(i) * 400 + 540, slot);
                     delay(15);
                 }
                 delay(20);
                 Serial.println("Sending touchpad click");
                 dualsense->press(DUALSENSE_BUTTON_TOUCHPAD);
-                Serial.println("Pressing R5");
                 delay(200);
                 dualsense->release(DUALSENSE_BUTTON_TOUCHPAD);
-                dualsense->releaseLeftTouchpad();
+                dualsense->touchpadStopTouch(slot);
                 break;
             }
             case 33: {
@@ -556,6 +557,33 @@ void loop()
                     compositeHID.setBatteryLevel(i);
                     dwell(1000);
                 }
+                break;
+            }
+            case 34: {
+                Serial.println("Sweeping L2/R2 trigger feedback position");
+                for (int pos = 0; pos <= 255; pos += 5) {
+                    dualsense->setL2TriggerFeedback(0x11, pos, 0);
+                    dualsense->setR2TriggerFeedback(0x11, 255 - pos, 0);
+                    delay(15);
+                }
+                dualsense->setL2TriggerFeedback(0x00, 0, 0);
+                dualsense->setR2TriggerFeedback(0x00, 0, 0);
+                break;
+            }
+            case 35: {
+                Serial.println("Toggling status2 flags: headphones, mic, mute, USB");
+                dualsense->setHeadphonesPlugged(true);
+                delay(500);
+                dualsense->setHeadphoneMic(true);
+                delay(500);
+                dualsense->setMuteActive(true);
+                delay(500);
+                dualsense->setUsbPlugged(true);
+                delay(1000);
+                dualsense->setHeadphonesPlugged(false);
+                dualsense->setHeadphoneMic(false);
+                dualsense->setMuteActive(false);
+                dualsense->setUsbPlugged(false);
                 break;
             }
             default: {
