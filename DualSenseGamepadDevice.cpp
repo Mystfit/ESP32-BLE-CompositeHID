@@ -350,6 +350,7 @@ void DualsenseGamepadDevice::resetInputs()
     _inputReport.touchpoint_r_contact = 0x80;
     _inputReport.timestamp = 0x7621DD40;
     _inputReport.status = 0x0A;  // 100% battery, discharging
+    _inputReport.active_profile = 0x10;  // profile slot 1 active, no config-menu bits
 
     // Controller at rest: ~1g on the axis facing down.
     _inputReport.accel_x = 0;
@@ -576,6 +577,20 @@ void DualsenseGamepadDevice::setChargingStatus(bool charging)
         {
             std::lock_guard<std::mutex> lock(_mutex);
             _inputReport.status = newStatus;
+        }
+
+        if (_config->getAutoReport()) {
+            sendGamepadReport();
+        }
+    }
+}
+
+void DualsenseGamepadDevice::setActiveProfile(uint8_t profile)
+{
+    if (_inputReport.active_profile != profile) {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _inputReport.active_profile = profile;
         }
 
         if (_config->getAutoReport()) {

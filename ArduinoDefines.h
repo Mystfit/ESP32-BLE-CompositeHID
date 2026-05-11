@@ -5,6 +5,14 @@
 #define LED_BUILTIN 2    
 #endif
 
+#ifndef RGB_BUILTIN
+#define RGB_BUILTIN LED_BUILTIN
+#endif
+
+#ifndef RGB_BRIGHTNESS
+#define RGB_BRIGHTNESS 64
+#endif
+
 #define abs(x) ((x)>0?(x):-(x))
 #define constrain(amt,low,high) ((amt)<(low)?(low):((amt)>(high)?(high):(amt)))
 #define round(x)     ((x)>=0?(long)((x)+0.5):(long)((x)-0.5))

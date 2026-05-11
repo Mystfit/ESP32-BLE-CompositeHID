@@ -762,11 +762,11 @@ struct DualsenseGamepadOutputReportData {
     bool hasPlayerIndicator() const { return valid_flag1 & DS_OUT_FLAG1_PLAYER_INDICATOR; }
     bool hasMicMuteLed()      const { return valid_flag1 & DS_OUT_FLAG1_MIC_MUTE_LED;     }
 
-    // Convenience aliases mirroring the canonical wire roles. motor_left is
-    // the weak (high-frequency) motor; motor_right is the strong (low-
+    // Convenience aliases mirroring the canonical wire roles. motor_right is
+    // the weak (high-frequency) motor; motor_left is the strong (low-
     // frequency) motor.
-    uint8_t weakMotor()   const { return motor_left;  }
-    uint8_t strongMotor() const { return motor_right; }
+    uint8_t weakMotor()   const { return motor_right;  }
+    uint8_t strongMotor() const { return motor_left; }
 
     // default constructor OK
     DualsenseGamepadOutputReportData() = default;
@@ -992,7 +992,14 @@ struct DualsenseGamepadInputReportData {
     uint8_t touchpoint_r_contact = 0x80;  // byte 37
     uint16_t touchpoint_r_x : 12;   // bytes 38-39
     uint16_t touchpoint_r_y : 12;   // byte 40
-    uint8_t data_41_53[12];         // bytes 41-52
+    uint8_t data_41_48[8];          // bytes 41-48: reserved
+    // byte 49 (BT) / 48 (USB): DualSense Edge active-profile state byte.
+    // dualsense-tester (daidr/dualsense-tester) treats the controller as being
+    // in "configuration mode" — disabling Output/Audio/Gyro/Accel panels — when
+    // this byte is zero or its low two bits are set. Default 0x10 = profile
+    // slot 1 active with config-menu bits clear.
+    uint8_t active_profile = 0x10;  // byte 49
+    uint8_t data_50_52[3];          // bytes 50-52: reserved
 
     // byte 53: battery/status[0]. Low nibble = capacity 0-10, high nibble = charging state.
     // 0x0A = 100% discharging (normal). 0xFF would read as capacity=15 + charging=0xF (error).
@@ -1109,6 +1116,7 @@ public:
     void setGyro(int16_t pitch, int16_t yaw, int16_t roll);
     void setBatteryLevel(uint8_t level);
     void setChargingStatus(bool charging);
+    void setActiveProfile(uint8_t profile);
     void sendGamepadReport(bool defer = false);
     void sendFirmInfoReport(bool defer = false);
     void sendCalibrationReport(bool defer = false);

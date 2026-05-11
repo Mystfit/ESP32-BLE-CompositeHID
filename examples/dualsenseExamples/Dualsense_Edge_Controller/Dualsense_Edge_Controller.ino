@@ -94,8 +94,11 @@ static void OnHapticAudio(HapticAudioFrame frame)
         int16_t a = s < 0 ? -s : s;
         if (a > peak) peak = a;
     }
-    g_haptic_peak          = (peak > 127) ? 127 : (uint8_t)peak;
-    g_last_haptic_event_ms = millis();
+    g_haptic_peak = (peak > 127) ? 127 : (uint8_t)peak;
+    // Only mark haptic active when samples contain real signal. Silent/zero-byte
+    // 0x31 heartbeats always pass the sampleCount guard but have peak=0
+    if (peak > 0)
+        g_last_haptic_event_ms = millis();
 }
 
 FunctionSlot<HapticAudioFrame> hapticSlot(OnHapticAudio);
@@ -143,6 +146,10 @@ void OnLEDEvent(DualsenseGamepadOutputReportData data)
         ledcolor[1]=data.lightbar_green;
         ledcolor[2]=data.lightbar_blue;
         Serial.println(String("LED color change, R: ") + ledcolor[0] + " G: " + ledcolor[1] + " B: " + ledcolor[2]);
+        uint8_t r = map(ledcolor[0], 0, 255, 0, RGB_BRIGHTNESS);
+        uint8_t g = map(ledcolor[1], 0, 255, 0, RGB_BRIGHTNESS);
+        uint8_t b = map(ledcolor[2], 0, 255, 0, RGB_BRIGHTNESS);
+        rgbLedWrite(RGB_BUILTIN, r, g, b);
     }
 
     if (data.mute_button_led != muteled)
@@ -310,18 +317,19 @@ static void updateLEDIfDue()
     bool haptic_active = (now - g_last_haptic_event_ms <= 200);
     if (haptic_active) {
         uint8_t peak = g_haptic_peak;
-        uint8_t b    = 0;
+        uint8_t b = 0, g = 0;
         if (peak >= HAPTIC_LED_SILENCE) {
-            // Linear mapping: peak * 2 puts the LED clearly in "blue"
-            // territory at typical music levels (peak 60 -> b=120,
-            // peak 100 -> b=200, peak 127 -> b=254). Linear (not
-            // square-law) because at low brightness pure blue can read
-            // as greenish on the human eye, so we want enough drive
-            // for the colour to be unambiguous.
-            uint16_t v = (uint16_t)peak << 1;
-            b = v > 255 ? 255 : (uint8_t)v;
+            // Two-phase ramp across blue then green:
+            // peak 0-64  -> blue  0..RGB_BRIGHTNESS, green = 0
+            // peak 64-127 -> blue = RGB_BRIGHTNESS, green 0..RGB_BRIGHTNESS
+            if (peak <= 64) {
+                b = (uint8_t)map(peak, 0, 64, 0, RGB_BRIGHTNESS);
+            } else {
+                b = RGB_BRIGHTNESS;
+                g = (uint8_t)map(peak, 64, 127, 0, RGB_BRIGHTNESS);
+            }
         }
-        rgbLedWrite(RGB_BUILTIN, 0, 0, b);
+        rgbLedWrite(RGB_BUILTIN, 0, g, b);
         led_driving = true;
         return;
     }
@@ -329,8 +337,9 @@ static void updateLEDIfDue()
     // Priority 2: rumble. Red = weak (left) motor, green = strong
     // (right) motor. Square-law for perceptual feel.
     if (motor_left > 0 || motor_right > 0) {
-        uint8_t r = (uint8_t)(((uint16_t)motor_left  * motor_left)  >> 7);
-        uint8_t g = (uint8_t)(((uint16_t)motor_right * motor_right) >> 7);
+        uint8_t r = (uint8_t)map(motor_left, 0, 255, 0, RGB_BRIGHTNESS);
+        uint8_t g = (uint8_t)map(motor_right, 0, 255, 0, RGB_BRIGHTNESS);
+        Serial.println("Rumble LED r: " + String(r) + " g: " + String(g));
         rgbLedWrite(RGB_BUILTIN, r, g, 0);
         led_driving = true;
         return;

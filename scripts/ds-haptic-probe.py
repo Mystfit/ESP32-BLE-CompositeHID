@@ -61,6 +61,7 @@ import math
 import os
 import re
 import struct
+import subprocess
 import sys
 import time
 import zlib
@@ -84,6 +85,18 @@ DS_REPORT_LEN_32    = 142
 DS_PKT_AUDIO_OFFSET = 13   # default offset of 0x12 audio data within the 142-byte buffer
 DS_PKT_AUDIO_LENGTH = 64   # canonical 0x12 sub-packet length (32 stereo frames)
 
+# Report 0x36 (larger haptic-audio variant from recent Unreal-Dualsense builds)
+# — 398 bytes total, same 0x11 + 0x12 sub-packet protocol as 0x32 but in a
+# wider buffer so you can fit a much larger 0x12 audio payload per packet.
+# That cuts the per-second report rate (e.g. 25 Hz at 240-byte audio vs ~94 Hz
+# at 64-byte audio), reducing BLE / NimBLE per-packet overhead on the ESP32.
+DS_REPORT_ID_36         = 0x36
+DS_REPORT_LEN_36        = 398
+DS_PKT_AUDIO_OFFSET_36  = 13   # same offset; only the trailing region grows
+DS_PKT_AUDIO_LENGTH_36  = 240  # default 0x12 length for 0x36 — 120 stereo
+                               # frames @ 3 kHz, well under the 255-byte
+                               # single-sub-packet length limit (uint8 length)
+
 DS_VID = 0x054C
 DS_PID = 0x0CE6
 
@@ -99,6 +112,12 @@ DS_VF0_HAPTIC_AUDIO_DEFAULT = DS_VF0_AUDIO_CONTROL | DS_VF0_HAPTICS_SELECT  # 0x
 # audio_control byte (buf[10], common_offset+7).
 # Bit 4 routes audio to the controller's internal speaker circuit (LRA actuators).
 DS_AUDIO_CTRL_INTERNAL_SPEAKER = 0x10
+
+# Defaults for audio-file piping mode (matches SAxense / soundsense and the
+# firmware's int8 stereo expectation; see DualsenseGamepadDevice.h:160-192).
+DS_HAPTIC_AUDIO_DEFAULT_RATE_HZ  = 3000   # SAxense / soundsense canonical rate
+DS_HAPTIC_AUDIO_DEFAULT_CHANNELS = 2      # stereo interleaved (L8 R8 L8 R8 ...)
+DS_HAPTIC_AUDIO_DEFAULT_FORMAT   = "s8"   # firmware reads int8_t
 
 
 # ---------------------------------------------------------------------------
@@ -153,25 +172,32 @@ def crc32_with_seed(buf: bytes, seed_byte: int) -> int:
     return zlib.crc32(bytes([seed_byte]) + buf) & 0xFFFFFFFF
 
 
-def build_report_0x32(payload_bytes: bytes,
-                      offset: int,
-                      seq: int,
-                      counter: int,
-                      with_crc: bool = True) -> bytes:
-    """Construct a 142-byte 0x32 haptic-audio report. By default (offset=13,
-    length=64) `payload_bytes` lands inside the 0x12 sub-packet's audio data
-    region. Sub-packet headers and the 0x11 control bytes (incl. the frame
-    counter at buf[10]) are always set so the firmware sub-packet parser
-    finds them; the user payload overlays whatever range they specify, which
-    is useful for pinpoint diagnostics (e.g. probing the padding region).
+def _build_haptic_subpacket_report(payload_bytes: bytes,
+                                   offset: int,
+                                   seq: int,
+                                   counter: int,
+                                   report_id: int,
+                                   total_size: int,
+                                   with_crc: bool = True) -> bytes:
+    """Shared builder for 0x32 (142-byte) and 0x36 (398-byte) haptic-audio
+    reports. Both use the same 0x11 + 0x12 sub-packet protocol; only the
+    overall buffer size differs (0x36 has room for a larger 0x12 audio
+    sub-packet or additional sub-packets like 0x15 headset-audio).
+
+    By default (offset=13) `payload_bytes` lands inside the 0x12 sub-packet's
+    audio region. The 0x12 length byte is set to len(payload_bytes), so the
+    firmware parser pulls exactly the bytes we wrote — no zero padding read
+    as fake audio. Max single 0x12 length is 255 (uint8 length field).
     """
     if offset < 2:
         raise ValueError("offset must be >= 2 (after report_id/seq_tag)")
-    if offset + len(payload_bytes) > DS_REPORT_LEN_32 - (4 if with_crc else 0):
+    if offset + len(payload_bytes) > total_size - (4 if with_crc else 0):
         raise ValueError("payload extends into CRC region")
+    if len(payload_bytes) > 255:
+        raise ValueError("0x12 sub-packet length field is uint8 (max 255 bytes)")
 
-    buf = bytearray(DS_REPORT_LEN_32)
-    buf[0]  = DS_REPORT_ID_32
+    buf = bytearray(total_size)
+    buf[0]  = report_id
     buf[1]  = ((seq & 0x0F) << 4) | 0x00      # seq_tag
 
     # Sub-packet 0x11: control / engine state, 7 data bytes.
@@ -182,17 +208,44 @@ def build_report_0x32(payload_bytes: bytes,
     buf[9]  = 0xFF          # end-of-buffer marker
     buf[10] = counter & 0xFF
 
-    # Sub-packet 0x12: audio data, 64 bytes.
-    buf[11] = 0x92          # pid=0x12 | sized=0x80
-    buf[12] = 0x40          # length = 64
+    # Sub-packet 0x12: audio data, length matches the user payload.
+    buf[11] = 0x92                       # pid=0x12 | sized=0x80
+    buf[12] = len(payload_bytes) & 0xFF  # length
 
-    # User payload overlay (defaults to bytes 13..76 = the 64-byte audio region).
     buf[offset:offset + len(payload_bytes)] = payload_bytes
 
     if with_crc:
-        crc = crc32_with_seed(bytes(buf[:DS_REPORT_LEN_32 - 4]), DS_CRC_SEED)
-        struct.pack_into("<I", buf, DS_REPORT_LEN_32 - 4, crc)
+        crc = crc32_with_seed(bytes(buf[:total_size - 4]), DS_CRC_SEED)
+        struct.pack_into("<I", buf, total_size - 4, crc)
     return bytes(buf)
+
+
+def build_report_0x32(payload_bytes: bytes,
+                      offset: int,
+                      seq: int,
+                      counter: int,
+                      with_crc: bool = True) -> bytes:
+    """142-byte 0x32 haptic-audio report (SAxense / soundsense / older
+    Unreal-Dualsense)."""
+    return _build_haptic_subpacket_report(payload_bytes, offset, seq, counter,
+                                          report_id=DS_REPORT_ID_32,
+                                          total_size=DS_REPORT_LEN_32,
+                                          with_crc=with_crc)
+
+
+def build_report_0x36(payload_bytes: bytes,
+                      offset: int,
+                      seq: int,
+                      counter: int,
+                      with_crc: bool = True) -> bytes:
+    """398-byte 0x36 haptic-audio report (recent Unreal-Dualsense). Same
+    sub-packet protocol as 0x32, larger buffer — fits much bigger 0x12
+    audio sub-packets, which lowers the per-second report rate and reduces
+    BLE / NimBLE per-packet overhead on the ESP32."""
+    return _build_haptic_subpacket_report(payload_bytes, offset, seq, counter,
+                                          report_id=DS_REPORT_ID_36,
+                                          total_size=DS_REPORT_LEN_36,
+                                          with_crc=with_crc)
 
 
 def build_report(payload_bytes: bytes,
@@ -256,6 +309,85 @@ def gen_constant(length: int, value: int) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Audio-file source (ffmpeg pipe)
+# ---------------------------------------------------------------------------
+
+def open_audio_stream(path: str,
+                      sample_rate: int,
+                      channels: int,
+                      audio_format: str,
+                      loop: bool,
+                      volume_db: float,
+                      ffmpeg_bin: str,
+                      monitor_driver: Optional[str] = None,
+                      monitor_device: str = "default",
+                      monitor_rate: int = 44100,
+                      monitor_channels: int = 2) -> subprocess.Popen:
+    """Spawn ffmpeg decoding `path` to raw PCM on stdout. We deliberately do
+    NOT pass `-re`: the main loop already paces sends via time.sleep, and
+    ffmpeg will block on pipe backpressure naturally — adding `-re` here
+    would double-pace and drift against our schedule.
+
+    When `monitor_driver` is set (e.g. "pulse"), ffmpeg is given a second
+    output that plays locally at full quality via that driver. The haptic
+    pipe remains on stdout (pipe:1). ffmpeg's pulse muxer thread runs
+    independently, so local audio stays smooth regardless of Python's pacing."""
+    cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "error"]
+    if loop:
+        cmd += ["-stream_loop", "-1"]
+    cmd += ["-i", path]
+
+    if monitor_driver:
+        # Two outputs require explicit -map per output. Apply volume (if any)
+        # via asplit so both branches share the same filter graph.
+        if volume_db != 0.0:
+            cmd += ["-filter_complex",
+                    f"[0:a]volume={volume_db}dB,asplit=2[h][m]"]
+            cmd += ["-map", "[h]"]   # haptic pipe
+        else:
+            cmd += ["-map", "0:a"]   # haptic pipe
+        cmd += ["-ac", str(channels), "-ar", str(sample_rate),
+                "-f", audio_format, "pipe:1"]
+
+        if volume_db != 0.0:
+            cmd += ["-map", "[m]"]   # monitor
+        else:
+            cmd += ["-map", "0:a"]   # monitor
+        cmd += ["-ac", str(monitor_channels), "-ar", str(monitor_rate),
+                "-f", monitor_driver, monitor_device]
+    else:
+        if volume_db != 0.0:
+            cmd += ["-af", f"volume={volume_db}dB"]
+        cmd += ["-ac", str(channels), "-ar", str(sample_rate),
+                "-f", audio_format, "-"]
+
+    try:
+        proc = subprocess.Popen(cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                bufsize=0)
+    except FileNotFoundError:
+        sys.exit(f"ffmpeg not found at {ffmpeg_bin!r}. Install ffmpeg or "
+                 "pass --ffmpeg /path/to/ffmpeg.")
+    return proc
+
+
+def read_audio_chunk(proc: subprocess.Popen,
+                     length: int,
+                     silence_byte: int) -> tuple:
+    """Read exactly `length` bytes from the ffmpeg pipe. On EOF, pad the
+    remainder with silence and return (chunk, eof=True)."""
+    buf = bytearray()
+    while len(buf) < length:
+        part = proc.stdout.read(length - len(buf))
+        if not part:
+            buf.extend(bytes([silence_byte]) * (length - len(buf)))
+            return bytes(buf), True
+        buf.extend(part)
+    return bytes(buf), False
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -265,21 +397,32 @@ def main():
     ap.add_argument("--device", help="hidraw node (default: auto-detect Sony DS)")
     ap.add_argument("--report", type=lambda s: int(s, 0), default=DS_REPORT_ID_BT,
                     help="output report ID to write: 0x31 (default; 78-byte BT report "
-                         "with 24-byte reserved-region haptic window) or 0x32 "
+                         "with 24-byte reserved-region haptic window), 0x32 "
                          "(142-byte haptic-audio sub-protocol with 0x11 control + "
-                         "0x12 audio sub-packets, matches SAxense / soundsense)")
-    ap.add_argument("--rate-hz", type=float, default=50.0,
-                    help="output reports per second (default: 50)")
+                         "0x12 audio sub-packets, matches SAxense / soundsense), or "
+                         "0x36 (398-byte larger haptic-audio variant from recent "
+                         "Unreal-Dualsense — same sub-packet protocol but accepts "
+                         "much bigger 0x12 audio payloads, lowering report rate "
+                         "and BLE/NimBLE per-packet overhead on the ESP32)")
+    ap.add_argument("--rate-hz", type=float, default=None,
+                    help="output reports per second (default: 50 for synthetic "
+                         "patterns; auto-derived from --audio-rate / "
+                         "frames-per-packet for audio mode)")
     ap.add_argument("--duration", type=float, default=5.0,
                     help="seconds to run; 0 = run until Ctrl-C (default: 5)")
-    ap.add_argument("--pattern", choices=("counter", "sine", "constant"),
+    ap.add_argument("--pattern", choices=("counter", "sine", "constant", "audio"),
                     default="counter",
-                    help="payload pattern (default: counter — most diagnosable)")
+                    help="payload pattern (default: counter — most diagnosable; "
+                         "use 'audio' or pass --audio-file to stream a decoded "
+                         "audio file via ffmpeg)")
     ap.add_argument("--offset", type=int, default=None,
                     help="byte offset within the report (default: 50 for 0x31, "
-                         "13 for 0x32 — the start of each report's haptic payload)")
+                         "13 for 0x32 / 0x36 — the start of each report's "
+                         "haptic payload)")
     ap.add_argument("--length", type=int, default=None,
-                    help="payload length in bytes (default: 24 for 0x31, 64 for 0x32)")
+                    help="payload length in bytes (default: 24 for 0x31, 64 for "
+                         "0x32, 240 for 0x36 — 0x36's larger buffer fits a much "
+                         "bigger 0x12 sub-packet up to the uint8 length max of 255)")
     ap.add_argument("--value", type=lambda s: int(s, 0), default=0xAA,
                     help="constant byte value (default: 0xAA)")
     ap.add_argument("--sine-freq", type=float, default=200.0,
@@ -297,17 +440,96 @@ def main():
                     help="audio_control byte (default: 0x10 = internal speaker/LRA routing)")
     ap.add_argument("--audio-ctrl2", type=lambda s: int(s, 0), default=0x00,
                     help="audio_control2 byte (default: 0x00)")
+    ap.add_argument("--audio-file",
+                    help="path to an audio file to decode via ffmpeg and stream "
+                         "as the payload (any format ffmpeg can read). Implies "
+                         "--pattern audio; loops by default. See SAxense / "
+                         "soundsense for the reference flow.")
+    ap.add_argument("--audio-rate", type=int,
+                    default=DS_HAPTIC_AUDIO_DEFAULT_RATE_HZ,
+                    help=f"audio sample rate fed to ffmpeg "
+                         f"(default: {DS_HAPTIC_AUDIO_DEFAULT_RATE_HZ} Hz, the "
+                         f"SAxense / soundsense canonical haptic-audio rate)")
+    ap.add_argument("--audio-channels", type=int, choices=(1, 2),
+                    default=DS_HAPTIC_AUDIO_DEFAULT_CHANNELS,
+                    help=f"audio channel count "
+                         f"(default: {DS_HAPTIC_AUDIO_DEFAULT_CHANNELS}; firmware "
+                         f"expects stereo interleaved)")
+    ap.add_argument("--audio-format", choices=("s8", "u8"),
+                    default=DS_HAPTIC_AUDIO_DEFAULT_FORMAT,
+                    help=f"raw PCM sample format requested from ffmpeg "
+                         f"(default: {DS_HAPTIC_AUDIO_DEFAULT_FORMAT}; firmware "
+                         f"reads int8_t so s8 is correct)")
+    ap.add_argument("--audio-no-loop", action="store_true",
+                    help="play the audio file once and stop (default: loop forever)")
+    ap.add_argument("--audio-volume-db", type=float, default=0.0,
+                    help="apply an ffmpeg volume filter in dB (default: 0.0 = unity)")
+    ap.add_argument("--ffmpeg", default="ffmpeg",
+                    help="ffmpeg binary path (default: ffmpeg from PATH)")
+    ap.add_argument("--monitor", action="store_true",
+                    help="play audio locally while sending haptic data. Adds a "
+                         "second ffmpeg output at full quality (44100 Hz) routed "
+                         "via --monitor-driver. Only valid with --audio-file.")
+    ap.add_argument("--monitor-driver",
+                    choices=("pulse", "alsa", "pipewire"),
+                    default="pulse",
+                    help="ffmpeg audio driver for local monitoring "
+                         "(default: pulse; PipeWire intercepts this transparently)")
+    ap.add_argument("--monitor-device", default="default",
+                    help="output device passed to the monitor driver "
+                         "(default: default)")
     ap.add_argument("--verbose", action="store_true",
                     help="print every report we write (slow, debugging only)")
     args = ap.parse_args()
 
     # Per-report defaults for offset/length when the user didn't override them.
     if args.report == DS_REPORT_ID_32:
-        if args.offset is None: args.offset = DS_PKT_AUDIO_OFFSET   # 13
-        if args.length is None: args.length = DS_PKT_AUDIO_LENGTH   # 64
+        if args.offset is None: args.offset = DS_PKT_AUDIO_OFFSET      # 13
+        if args.length is None: args.length = DS_PKT_AUDIO_LENGTH      # 64
+    elif args.report == DS_REPORT_ID_36:
+        if args.offset is None: args.offset = DS_PKT_AUDIO_OFFSET_36   # 13
+        if args.length is None: args.length = DS_PKT_AUDIO_LENGTH_36   # 240
     else:
         if args.offset is None: args.offset = 50
         if args.length is None: args.length = 24
+
+    # --audio-file implies the audio pattern; the inverse must also be valid.
+    if args.audio_file:
+        args.pattern = "audio"
+    if args.pattern == "audio" and not args.audio_file:
+        sys.exit("--pattern audio requires --audio-file PATH")
+
+    # Auto-derive report rate from the audio config when not set explicitly,
+    # otherwise audio plays at the wrong speed (loop pacing != sample rate).
+    if args.rate_hz is None:
+        if args.pattern == "audio":
+            bytes_per_frame = args.audio_channels   # s8/u8 = 1 byte/sample
+            frames_per_packet = args.length // bytes_per_frame
+            if frames_per_packet < 1:
+                sys.exit(f"--length {args.length} too small for "
+                         f"{args.audio_channels}-channel audio")
+            args.rate_hz = args.audio_rate / frames_per_packet
+            print(f"audio mode: auto-derived --rate-hz = {args.rate_hz:.3f} "
+                  f"({args.audio_rate} Hz / {frames_per_packet} frames per packet)")
+        else:
+            args.rate_hz = 50.0
+
+    audio_proc = None
+    silence_byte = 0x00 if args.audio_format == "s8" else 0x80
+    if args.pattern == "audio":
+        monitor_driver = args.monitor_driver if args.monitor else None
+        if monitor_driver:
+            print(f"monitoring locally via ffmpeg -{monitor_driver} "
+                  f"({args.monitor_device}, 44100 Hz stereo)")
+        audio_proc = open_audio_stream(args.audio_file,
+                                       args.audio_rate,
+                                       args.audio_channels,
+                                       args.audio_format,
+                                       loop=not args.audio_no_loop,
+                                       volume_db=args.audio_volume_db,
+                                       ffmpeg_bin=args.ffmpeg,
+                                       monitor_driver=monitor_driver,
+                                       monitor_device=args.monitor_device)
 
     device = args.device or find_hidraw_for_dualsense()
     if not device:
@@ -344,6 +566,7 @@ def main():
 
     sent = 0
     next_t = time.monotonic()
+    audio_eof = False
     try:
         while True:
             if end_at and time.monotonic() >= end_at:
@@ -354,11 +577,18 @@ def main():
             elif args.pattern == "sine":
                 payload = gen_sine(args.length, sent,
                                    args.sine_srate, args.sine_freq)
+            elif args.pattern == "audio":
+                payload, audio_eof = read_audio_chunk(audio_proc, args.length,
+                                                      silence_byte)
             else:  # constant
                 payload = gen_constant(args.length, args.value)
 
             if args.report == DS_REPORT_ID_32:
                 report = build_report_0x32(payload, args.offset, sent,
+                                           counter=sent,
+                                           with_crc=not args.no_crc)
+            elif args.report == DS_REPORT_ID_36:
+                report = build_report_0x36(payload, args.offset, sent,
                                            counter=sent,
                                            with_crc=not args.no_crc)
             else:
@@ -375,6 +605,10 @@ def main():
             if args.verbose:
                 print(f"#{sent} {report.hex()}")
 
+            # In non-looping audio mode, send the final padded chunk then exit.
+            if audio_eof:
+                break
+
             next_t += interval
             sleep_for = next_t - time.monotonic()
             if sleep_for > 0:
@@ -386,6 +620,21 @@ def main():
         pass
     finally:
         os.close(fd)
+        if audio_proc is not None:
+            try:
+                audio_proc.stdout.close()
+            except Exception:
+                pass
+            audio_proc.terminate()
+            try:
+                audio_proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                audio_proc.kill()
+            err = (audio_proc.stderr.read().decode("utf-8", "replace").strip()
+                   if audio_proc.stderr else "")
+            # rc < 0 means signal-killed (e.g. SIGTERM from us) — that's normal.
+            if err and (audio_proc.returncode or 0) > 0:
+                print(f"ffmpeg: {err}", file=sys.stderr)
         print(f"done. wrote {sent} reports.")
 
 
