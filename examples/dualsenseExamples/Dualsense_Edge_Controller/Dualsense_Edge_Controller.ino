@@ -80,6 +80,13 @@ FunctionSlot<DualsenseGamepadOutputReportData> ledSlot(OnLEDEvent);
 static volatile uint32_t g_haptic_events       = 0;
 static volatile uint8_t  g_haptic_peak         = 0;   // 0..127 (|int8|)
 static uint32_t          g_last_haptic_event_ms = 0;
+// Freshness timestamp for the rumble visualiser. Updated from OnVibrateEvent
+// whenever a rumble-bearing report carries non-zero motors. If a host (e.g.
+// Unreal-Dualsense quitting) stops sending output reports without first
+// zeroing the motors, motor_left/motor_right would otherwise stay non-zero
+// forever and the LED would stick on rumble colours.
+static volatile uint32_t g_last_rumble_ms        = 0;
+static constexpr uint32_t RUMBLE_FRESHNESS_MS    = 500;
 
 static void OnHapticAudio(HapticAudioFrame frame)
 {
@@ -141,15 +148,19 @@ void OnLEDEvent(DualsenseGamepadOutputReportData data)
         }
     } 
 
-    if (data.lightbar_red != ledcolor[0] || data.lightbar_green != ledcolor[1] || data.lightbar_blue != ledcolor[2]){
+    // Gate on hasLightbar(): audio-only 0x31/0x36 reports don't carry a
+    // lightbar update, and reading the bytes anyway would let stale/garbage
+    // values shadow whatever colour the host actually picked. The NeoPixel
+    // write is deferred to updateLEDIfDue() so this BLE callback stays free
+    // of hardware writes (see OnVibrateEvent comment + memory note
+    // feedback_ble_callback_logging) — writing here races the loop-thread
+    // NeoPixel and produces flicker / wrong colours.
+    if (data.hasLightbar() &&
+        (data.lightbar_red != ledcolor[0] || data.lightbar_green != ledcolor[1] || data.lightbar_blue != ledcolor[2])){
         ledcolor[0]=data.lightbar_red;
         ledcolor[1]=data.lightbar_green;
         ledcolor[2]=data.lightbar_blue;
         Serial.println(String("LED color change, R: ") + ledcolor[0] + " G: " + ledcolor[1] + " B: " + ledcolor[2]);
-        uint8_t r = map(ledcolor[0], 0, 255, 0, RGB_BRIGHTNESS);
-        uint8_t g = map(ledcolor[1], 0, 255, 0, RGB_BRIGHTNESS);
-        uint8_t b = map(ledcolor[2], 0, 255, 0, RGB_BRIGHTNESS);
-        rgbLedWrite(RGB_BUILTIN, r, g, b);
     }
 
     if (data.mute_button_led != muteled)
@@ -253,6 +264,11 @@ void OnVibrateEvent(DualsenseGamepadOutputReportData data)
             if(!message.isEmpty()) message += ",";
             message += "rumble_strong_motor:" + String(motor_right);
         }
+        // Stamp every rumble-bearing report (not just changes) so the LED
+        // visualiser can age out a stuck non-zero state if the host quits
+        // without sending zero rumble.
+        if (motor_left > 0 || motor_right > 0)
+            g_last_rumble_ms = millis();
     }
 
     // Log all adaptive-trigger effects whenever the host sets the effect flags.
@@ -335,11 +351,12 @@ static void updateLEDIfDue()
     }
 
     // Priority 2: rumble. Red = weak (left) motor, green = strong
-    // (right) motor. Square-law for perceptual feel.
-    if (motor_left > 0 || motor_right > 0) {
+    // (right) motor. Gated on RUMBLE_FRESHNESS_MS so a host that quits
+    // mid-rumble (e.g. Unreal) doesn't strand the LED on the last colour.
+    bool rumble_fresh = (now - g_last_rumble_ms) < RUMBLE_FRESHNESS_MS;
+    if (rumble_fresh && (motor_left > 0 || motor_right > 0)) {
         uint8_t r = (uint8_t)map(motor_left, 0, 255, 0, RGB_BRIGHTNESS);
         uint8_t g = (uint8_t)map(motor_right, 0, 255, 0, RGB_BRIGHTNESS);
-        Serial.println("Rumble LED r: " + String(r) + " g: " + String(g));
         rgbLedWrite(RGB_BUILTIN, r, g, 0);
         led_driving = true;
         return;
