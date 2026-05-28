@@ -12,6 +12,7 @@
 #include "DualsenseDescriptors.h"
 #include "DualsenseGamepadConfiguration.h"
 #include "GamepadDevice.h"
+#include "gamepad/interface/GamepadComponents.h"
 // Button bitmasks
 #define DUALSENSE_BUTTON_Y 0x08
 #define DUALSENSE_BUTTON_B 0x04
@@ -48,13 +49,16 @@
 // Dpad values
 
 // Dpad bitflags
-enum DualsenseDpadFlags : uint8_t {
-    NONE = 0x08,
+enum class DualsenseDpadFlags : uint8_t {
+    NONE  = 0x08,
     NORTH = 0x00,
-    EAST = 0x02,
+    EAST  = 0x02,
     SOUTH = 0x04,
-    WEST = 0x08
+    WEST  = 0x08
 };
+constexpr DualsenseDpadFlags operator|(DualsenseDpadFlags a, DualsenseDpadFlags b) {
+    return static_cast<DualsenseDpadFlags>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
 
 // Trigger range
 #define DUALSENSE_TRIGGER_MIN 0
@@ -150,11 +154,11 @@ enum DsTriggerEffectSubtype : uint8_t {
 };
 
 // Forwards
-class DualsenseGamepadDevice;
+class DualsenseEdgeGamepadDevice;
 
-class DualsenseGamepadCallbacks : public NimBLECharacteristicCallbacks {
+class DualsenseEdgeGamepadCallbacks : public NimBLECharacteristicCallbacks {
 public:
-    DualsenseGamepadCallbacks(DualsenseGamepadDevice* device);
+    DualsenseEdgeGamepadCallbacks(DualsenseEdgeGamepadDevice* device);
 
     void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
     void onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
@@ -162,7 +166,7 @@ public:
     void onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue) override;
 
 private:
-    DualsenseGamepadDevice* _device;
+    DualsenseEdgeGamepadDevice* _device;
 };
 
 // DualSense BT Output Report parsed view (wire format is 78 bytes).
@@ -886,7 +890,7 @@ static_assert(sizeof(DualsenseGamepadPairingReportdata) == DUALSENSE_PAIRING_INF
     return DUALSENSE_BUTTON_DPAD_NONE;
 }
 
-[[maybe_unused]] static String dPadDirectionName(uint8_t direction)
+[[maybe_unused]] static String dualsenseDPadDirectionName(uint8_t direction)
 {
     if (direction == DUALSENSE_BUTTON_DPAD_NORTH)
         return "NORTH";
@@ -907,62 +911,170 @@ static_assert(sizeof(DualsenseGamepadPairingReportdata) == DUALSENSE_PAIRING_INF
     return "NONE";
 }
 
-class DualsenseGamepadDevice : public BaseCompositeDevice {
+// IAdaptiveTrigger — analog trigger that receives effect commands from the host.
+// Defined here (after ParsedTriggerEffect) to avoid circular includes.
+struct IAdaptiveTrigger : public IAnalogTrigger {
+    Signal<DualsenseGamepadOutputReportData::ParsedTriggerEffect> onEffect;
+};
+
+// AdaptiveTriggerImpl — concrete IAdaptiveTrigger backed by a uint8_t field
+class AdaptiveTriggerImpl final : public IAdaptiveTrigger {
+    uint8_t& _field;
 public:
-    DualsenseGamepadDevice();
-    DualsenseGamepadDevice(DualsenseGamepadDeviceConfiguration* config);
-    ~DualsenseGamepadDevice();
+    explicit AdaptiveTriggerImpl(uint8_t& field) : _field(field) {}
+    void     setValue(uint16_t v) override { _field = v > 255 ? 255 : static_cast<uint8_t>(v); }
+    uint16_t getValue()    const override  { return _field; }
+    uint16_t getMinValue() const override  { return 0; }
+    uint16_t getMaxValue() const override  { return 255; }
+    void press()   override { _field = 255; }
+    void release() override { _field = 0;   }
+    bool isPressed() const override { return _field == 255; }
+};
+
+// BatteryImpl — IBattery backed by the DualSense status byte in the input report.
+// Low nibble = capacity level (0-10), high nibble = charging state.
+class BatteryImpl final : public IBattery {
+    uint8_t& _status;
+public:
+    explicit BatteryImpl(uint8_t& status) : _status(status) {}
+    uint8_t getLevel() const override {
+        return static_cast<uint8_t>(((_status & 0x0F) * 100) / 10);
+    }
+    bool isCharging() const override { return ((_status >> 4) & 0x0F) != 0; }
+    void setLevel(uint8_t pct) override {
+        uint8_t nibble = static_cast<uint8_t>((pct * 10) / 100);
+        if (nibble > 10) nibble = 10;
+        _status = static_cast<uint8_t>((_status & 0xF0) | (nibble & 0x0F));
+    }
+    void setCharging(bool charging) override {
+        _status = static_cast<uint8_t>((_status & 0x0F) | (charging ? 0x10 : 0x00));
+    }
+};
+
+// =============================================================================
+// IDualsenseEdgeGamepad — named interface for DualSense Edge controllers
+// =============================================================================
+struct IDualsenseEdgeGamepad {
+    // Face buttons (PlayStation naming)
+    virtual IButton& cross() = 0;
+    virtual IButton& circle() = 0;
+    virtual IButton& square() = 0;
+    virtual IButton& triangle() = 0;
+    // Shoulder buttons
+    virtual IButton& l1() = 0;
+    virtual IButton& r1() = 0;
+    // Stick clicks
+    virtual IButton& l3() = 0;
+    virtual IButton& r3() = 0;
+    // Edge paddle buttons
+    virtual IButton& l4() = 0;
+    virtual IButton& r4() = 0;
+    virtual IButton& l5() = 0;
+    virtual IButton& r5() = 0;
+    // Special buttons
+    virtual IButton& select() = 0;
+    virtual IButton& start() = 0;
+    virtual IButton& home() = 0;
+    virtual IButton& touchpadButton() = 0;
+    virtual IButton& share() = 0;
+    virtual IButton& mute() = 0;
+    // Adaptive triggers (IAdaptiveTrigger exposes onEffect Signal)
+    virtual IAdaptiveTrigger& leftTrigger() = 0;
+    virtual IAdaptiveTrigger& rightTrigger() = 0;
+    // Sticks
+    virtual IAnalogStick& leftStick() = 0;
+    virtual IAnalogStick& rightStick() = 0;
+    // DPad
+    virtual IDPad& dpad() = 0;
+    // Battery (device → host)
+    virtual IBattery& battery() = 0;
+    // Output components (host → device, Signal-based)
+    virtual IRumbleMotor&    rumble()          = 0;
+    virtual IPlayerIndicator& playerIndicator() = 0;
+    virtual ILight&          light()           = 0;
+    virtual ISpeaker&        speaker()         = 0;
+    virtual IMicrophone&     microphone()      = 0;
+    // Lifecycle
+    virtual void sendReport(bool defer = false) = 0;
+    virtual void resetInputs() = 0;
+    virtual ~IDualsenseEdgeGamepad() = default;
+};
+
+// =============================================================================
+// DualsenseEdgeGamepadDevice
+// =============================================================================
+class DualsenseEdgeGamepadDevice : public BaseCompositeDevice, public IDualsenseEdgeGamepad {
+    DualsenseGamepadInputReportData _inputReport;   // declared first — components hold refs into it
+
+public:
+    DualsenseEdgeGamepadDevice();
+    DualsenseEdgeGamepadDevice(DualsenseEdgeControllerDeviceConfiguration* config);
+    ~DualsenseEdgeGamepadDevice();
 
     void init(NimBLEHIDDevice* hid) override;
     const BaseCompositeDeviceConfiguration* getDeviceConfig() const override;
 
-    Signal<DualsenseGamepadOutputReportData> onReceivedOutputReport;
+    // IDualsenseEdgeGamepad
+    IButton& cross()          override { return _cross; }
+    IButton& circle()         override { return _circle; }
+    IButton& square()         override { return _square; }
+    IButton& triangle()       override { return _triangle; }
+    IButton& l1()             override { return _l1; }
+    IButton& r1()             override { return _r1; }
+    IButton& l3()             override { return _l3; }
+    IButton& r3()             override { return _r3; }
+    IButton& l4()             override { return _l4; }
+    IButton& r4()             override { return _r4; }
+    IButton& l5()             override { return _l5; }
+    IButton& r5()             override { return _r5; }
+    IButton& select()         override { return _select; }
+    IButton& start()          override { return _start; }
+    IButton& home()           override { return _home; }
+    IButton& touchpadButton() override { return _touchpadBtn; }
+    IButton& share()          override { return _share; }
+    IButton& mute()           override { return _mute; }
+    IAdaptiveTrigger& leftTrigger()  override { return _leftTrigger; }
+    IAdaptiveTrigger& rightTrigger() override { return _rightTrigger; }
+    IAnalogStick& leftStick()   override { return _leftStick; }
+    IAnalogStick& rightStick()  override { return _rightStick; }
+    IDPad& dpad()               override { return _dpad; }
+    IBattery& battery()         override { return _battery; }
+    IRumbleMotor&    rumble()          override { return _rumble; }
+    IPlayerIndicator& playerIndicator() override { return _playerIndicator; }
+    ILight&          light()           override { return _light; }
+    ISpeaker&        speaker()         override { return _speaker; }
+    IMicrophone&     microphone()      override { return _microphone; }
+    void sendReport(bool defer = false) override;
+    void resetInputs() override;
 
-    // Input Controls
-    void resetInputs();
-    void press(uint32_t button = DUALSENSE_BUTTON_A);
-    void release(uint32_t button = DUALSENSE_BUTTON_A);
-    bool isPressed(uint32_t button = DUALSENSE_BUTTON_A);
-    void setLeftThumb(int8_t x = 0, int8_t y = 0);
-    void setRightThumb(int8_t x = 0, int8_t y = 0);
-    void setLeftTrigger(uint8_t rX = 0);
-    void setRightTrigger(uint8_t rY = 0);
-    void setTriggers(uint8_t rX = 0, uint8_t rY = 0);
-    void pressDPadDirection(uint8_t direction = 0);
-    void pressDPadDirectionFlag(DualsenseDpadFlags direction = DualsenseDpadFlags::NONE);
-    void releaseDPad();
-    bool isDPadPressed(uint8_t direction = 0);
-    bool isDPadPressedFlag(DualsenseDpadFlags direction);
-    void pressShare();
-    void releaseShare();
+    // Touchpad — slot-based multi-touch (contact byte encodes touch ID)
+    // Returns slot index (0 or 1) on success, -1 if both slots are occupied.
     int8_t touchpadStartTouch(uint16_t x, uint16_t y);
-    void touchpadUpdatePosition(uint16_t x, uint16_t y, uint8_t touchpointId);
-    void touchpadStopTouch(uint8_t touchpointId);
+    void touchpadUpdatePosition(uint16_t x, uint16_t y, uint8_t slotIndex);
+    void touchpadStopTouch(uint8_t slotIndex);
+    // IMU
     void setAccel(int16_t x, int16_t y, int16_t z);
     void setGyro(int16_t pitch, int16_t yaw, int16_t roll);
-    void setBatteryLevel(uint8_t level);
-    void setChargingStatus(bool charging);
     // effectFlags (community RE, not in Linux driver): bits 0-3 = active effect type
     //   (0=none, 1=feedback/resistance, 2=weapon snap, 6=vibration); bit 4 = trigger in active zone.
     // position: actuator readback 0-255. Host does not use these for gameplay; zeros are safe.
     void setL2TriggerFeedback(uint8_t effectFlags, uint8_t position, uint8_t reserved = 0);
     void setR2TriggerFeedback(uint8_t effectFlags, uint8_t position, uint8_t reserved = 0);
+    // Peripheral/connection status reported in input report status2 byte
     void setHeadphonesPlugged(bool plugged);
     void setHeadphoneMic(bool connected);
     void setMuteActive(bool active);
     void setUsbPlugged(bool plugged);
-    void sendGamepadReport(bool defer = false);
-    void sendFirmInfoReport(bool defer = false);
-    void sendCalibrationReport(bool defer = false);
-    void sendPairingInfoReport(bool defer = false);
     void timestamp();
     void seq();
 
-    // Called by callback when host reads a feature report - populates value before read completes
+    // Feature report helpers
+    void sendFirmInfoReport(bool defer = false);
+    void sendCalibrationReport(bool defer = false);
+    void sendPairingInfoReport(bool defer = false);
     void populateFeatureReportOnRead(NimBLECharacteristic* pCharacteristic);
 
-    // Characteristic accessors used by DualsenseGamepadCallbacks to identify
-    // which pipe a read/subscribe came from when logging.
+    // Characteristic accessors used by callbacks
     NimBLECharacteristic* getInputChar()          { return getInput(); }
     NimBLECharacteristic* getOutputChar()         { return getOutput(); }
     NimBLECharacteristic* getMinimalInput() const { return _minimalInput; }
@@ -976,14 +1088,38 @@ private:
     void sendFirmInfoReportImpl();
     void sendCalibrationReportImpl();
     void sendPairingInfoReportImpl();
-    DualsenseGamepadInputReportData _inputReport;
-    DualsenseGamepadPairingReportdata _pairingReport;
     void buildFeatureReportWithCrc(uint8_t reportId, const uint8_t* payload,
-        size_t payloadSize, uint8_t* outBuffer, size_t outSize);
-    DualsenseGamepadDeviceConfiguration* _config;
+                                    size_t payloadSize, uint8_t* outBuffer, size_t outSize);
+
+    DSButtonImpl _cross, _circle, _square, _triangle;
+    DSButtonImpl _l1, _r1;
+    DSButtonImpl _select, _start, _home;
+    DSButtonImpl _l3, _r3;
+    DSButtonImpl _touchpadBtn, _share, _mute;
+    DSButtonImpl _l4, _r4, _l5, _r5;
+
+    AdaptiveTriggerImpl _leftTrigger;
+    AdaptiveTriggerImpl _rightTrigger;
+
+    AnalogStickImpl<uint8_t, 0x80> _leftStick;
+    AnalogStickImpl<uint8_t, 0x80> _rightStick;
+
+    NibbleHatDPadImpl _dpad;
+    uint8_t _touchPointId[2] = {0};
+    bool _touchPointActive[2] = {false};
+    uint8_t _nextTouchId = 1;
+    BatteryImpl      _battery;
+    ILight           _light;
+    IPlayerIndicator _playerIndicator;
+    IRumbleMotor     _rumble;
+    ISpeaker         _speaker;
+    IMicrophone      _microphone;
+
+    DualsenseGamepadPairingReportdata    _pairingReport;
+    DualsenseEdgeControllerDeviceConfiguration* _config;
     NimBLECharacteristic* _extra_input;
     NimBLECharacteristic* _minimalInput;  // 0x01 9-byte Generic Desktop input report (BLE GAP requirement)
-    DualsenseGamepadCallbacks* _callbacks;
+    DualsenseEdgeGamepadCallbacks* _callbacks;
     NimBLECharacteristic* _calibration;
     NimBLECharacteristic* _firmwareInfo;
     NimBLECharacteristic* _pairingInfo;
@@ -991,10 +1127,6 @@ private:
     uint32_t crc32_le(unsigned int crc, unsigned char const* buf, unsigned int len);
     void generate_crc_table(uint32_t* crcTable);
     uint32_t* m_pCrcTable;
-    uint8_t _touchPointId[2] = {0};
-    bool _touchPointActive[2] = {false};
-    uint8_t _nextTouchId = 1;
-    // Threading
     std::mutex _mutex;
 };
 

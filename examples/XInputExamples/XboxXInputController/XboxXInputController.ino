@@ -1,63 +1,39 @@
-#include <BleConnectionStatus.h>
+#include <BleGamepad.h>
 
-#include <BleCompositeHID.h>
-#include <XboxGamepadDevice.h>
+int ledPin = 5;
 
-int ledPin = 5; // LED connected to digital pin 13
-
-XboxGamepadDevice *gamepad;
+XboxGamepadDevice* gamepad;
 BleCompositeHID compositeHID("ESP32 SeriesX Controller", "Mystfit", 100);
 
-// FunctionSlot must be global to persist after setup() completes
-FunctionSlot<XboxGamepadOutputReportData> vibrationSlot(OnVibrateEvent);
+FunctionSlot<RumbleState> vibrationSlot(OnRumbleEvent);
 
-void OnVibrateEvent(XboxGamepadOutputReportData data)
+void OnRumbleEvent(RumbleState state)
 {
-    if(data.weakMotorMagnitude > 0 || data.strongMotorMagnitude > 0){
-        digitalWrite(ledPin, LOW);
-    } else {
-        digitalWrite(ledPin, HIGH);
-    }
-    Serial.println("Vibration event. Weak motor: " + String(data.weakMotorMagnitude) + " Strong motor: " + String(data.strongMotorMagnitude));
+    digitalWrite(ledPin, (state.weak > 0 || state.strong > 0) ? LOW : HIGH);
+    Serial.println("Rumble — weak: " + String(state.weak) + " strong: " + String(state.strong));
 }
 
 void setup()
 {
     Serial.begin(115200);
-    pinMode(ledPin, OUTPUT); // sets the digital pin as output
+    pinMode(ledPin, OUTPUT);
 
-    // Uncomment one of the following two config types depending on which controller version you want to use
-    // The XBox series X controller only works on linux kernels >= 6.5
-    
-    //XboxOneSControllerDeviceConfiguration* config = new XboxOneSControllerDeviceConfiguration();
-    XboxSeriesXControllerDeviceConfiguration* config = new XboxSeriesXControllerDeviceConfiguration();
-
-    // The composite HID device pretends to be a valid Xbox controller via vendor and product IDs (VID/PID).
-    // Platforms like windows/linux need this in order to pick an XInput driver over the generic BLE GATT HID driver. 
-    BLEHostConfiguration hostConfig = config->getIdealHostConfiguration();
-    Serial.println("Using VID source: " + String(hostConfig.getVidSource(), HEX));
-    Serial.println("Using VID: " + String(hostConfig.getVid(), HEX));
-    Serial.println("Using PID: " + String(hostConfig.getPid(), HEX));
-    Serial.println("Using GUID version: " + String(hostConfig.getGuidVersion(), HEX));
-    Serial.println("Using serial number: " + String(hostConfig.getSerialNumber()));
-    
-    // Set up gamepad
+    // Switch to XboxOneSControllerDeviceConfiguration for older compatibility.
+    auto* config = new XboxSeriesXControllerDeviceConfiguration();
     gamepad = new XboxGamepadDevice(config);
-
-    // Attach vibration event handler (FunctionSlot is defined globally)
-    gamepad->onVibrate.attach(vibrationSlot);
-
-    // Add all child devices to the top-level composite HID device to manage them
     compositeHID.addDevice(gamepad);
 
-    // Start the composite HID device to broadcast HID reports
-    Serial.println("Starting composite HID device...");
+    gamepad->rumble().onRumble.attach(vibrationSlot);
+
+    BLEHostConfiguration hostConfig = config->getIdealHostConfiguration();
+    Serial.println("VID: 0x" + String(hostConfig.getVid(), HEX)
+                 + "  PID: 0x" + String(hostConfig.getPid(), HEX));
     compositeHID.begin(hostConfig);
 }
 
 void loop()
 {
-    if(compositeHID.isConnected()){
+    if (compositeHID.isConnected()) {
         testButtons();
         testPads();
         testTriggers();
@@ -65,92 +41,61 @@ void loop()
     }
 }
 
-void testButtons(){
-    // Test each button
-    uint16_t buttons[] = {
-        XBOX_BUTTON_A, 
-        XBOX_BUTTON_B, 
-        XBOX_BUTTON_X, 
-        XBOX_BUTTON_Y, 
-        XBOX_BUTTON_LB, 
-        XBOX_BUTTON_RB, 
-        XBOX_BUTTON_START,
-        XBOX_BUTTON_SELECT,
-        //XBOX_BUTTON_HOME,   // Uncomment this to test the hom/guide button. Steam will flip out and enter big picture mode when running this sketch though so be warned!
-        XBOX_BUTTON_LS, 
-        XBOX_BUTTON_RS
+void testButtons()
+{
+    void (*presses[])() = {
+        []{ gamepad->a().press(); }, []{ gamepad->b().press(); },
+        []{ gamepad->x().press(); }, []{ gamepad->y().press(); },
+        []{ gamepad->lb().press(); }, []{ gamepad->rb().press(); },
+        []{ gamepad->start().press(); }, []{ gamepad->select().press(); },
+        []{ gamepad->ls().press(); }, []{ gamepad->rs().press(); }
     };
-    for (uint16_t button : buttons)
-    {
-        Serial.println("Pressing button " + String(button));
-        gamepad->press(button);
-        gamepad->sendGamepadReport();
-        delay(500);
-        gamepad->release(button);
-        gamepad->sendGamepadReport();
-        delay(100);
+    void (*releases[])() = {
+        []{ gamepad->a().release(); }, []{ gamepad->b().release(); },
+        []{ gamepad->x().release(); }, []{ gamepad->y().release(); },
+        []{ gamepad->lb().release(); }, []{ gamepad->rb().release(); },
+        []{ gamepad->start().release(); }, []{ gamepad->select().release(); },
+        []{ gamepad->ls().release(); }, []{ gamepad->rs().release(); }
+    };
+    for (int i = 0; i < 10; i++) {
+        presses[i]();  gamepad->sendReport(); delay(500);
+        releases[i](); gamepad->sendReport(); delay(100);
     }
-
-    // The share button is a seperate call since it doesn't live in the same 
-    // bitflag as the rest of the buttons
-    gamepad->pressShare();
-    gamepad->sendGamepadReport();
-    delay(500);
-    gamepad->releaseShare();
-    gamepad->sendGamepadReport();
-    delay(100);
+    gamepad->share().press();  gamepad->sendReport(); delay(500);
+    gamepad->share().release(); gamepad->sendReport(); delay(100);
 }
 
-void testPads(){
-    XboxDpadFlags directions[] = {
-        XboxDpadFlags::NORTH,
-        XboxDpadFlags((uint8_t)XboxDpadFlags::NORTH | (uint8_t)XboxDpadFlags::EAST),
-        XboxDpadFlags::EAST,
-        XboxDpadFlags((uint8_t)XboxDpadFlags::EAST | (uint8_t)XboxDpadFlags::SOUTH),
-        XboxDpadFlags::SOUTH,
-        XboxDpadFlags((uint8_t)XboxDpadFlags::SOUTH | (uint8_t)XboxDpadFlags::WEST),
-        XboxDpadFlags::WEST,
-        XboxDpadFlags((uint8_t)XboxDpadFlags::WEST | (uint8_t)XboxDpadFlags::NORTH)
+void testPads()
+{
+    const DPadDirection dirs[] = {
+        DPadDirection::N, DPadDirection::NE, DPadDirection::E, DPadDirection::SE,
+        DPadDirection::S, DPadDirection::SW, DPadDirection::W, DPadDirection::NW
     };
-
-    for (XboxDpadFlags direction : directions)
-    {
-        Serial.println("Pressing DPad: " + String(direction));
-        gamepad->pressDPadDirectionFlag(direction);
-        gamepad->sendGamepadReport();
-        delay(500);
-        gamepad->releaseDPad();
-        gamepad->sendGamepadReport();
-        delay(100);
+    for (DPadDirection d : dirs) {
+        gamepad->dpad().setDirection(d); gamepad->sendReport(); delay(500);
+        gamepad->dpad().release();       gamepad->sendReport(); delay(100);
     }
 }
 
-void testTriggers(){
-    for(int16_t val = XBOX_TRIGGER_MIN; val <= XBOX_TRIGGER_MAX; val++){
-        if(val % 8 == 0)
-            Serial.println("Setting trigger value to " + String(val));
-        gamepad->setLeftTrigger(val);
-        gamepad->setRightTrigger(val);
-        gamepad->sendGamepadReport();
+void testTriggers()
+{
+    for (int v = XBOX_TRIGGER_MIN; v <= XBOX_TRIGGER_MAX; v++) {
+        gamepad->leftTrigger().setValue(v);
+        gamepad->rightTrigger().setValue(v);
+        gamepad->sendReport();
         delay(8);
     }
 }
 
-void testThumbsticks(){
+void testThumbsticks()
+{
     int startTime = millis();
-    int reportCount = 0;
-    while(millis() - startTime < 8000){
-        reportCount++;
-        int16_t x = cos((float)millis() / 1000.0f) * XBOX_STICK_MAX;
-        int16_t y = sin((float)millis() / 1000.0f) * XBOX_STICK_MAX;
-
-        gamepad->setLeftThumb(x, y);
-        gamepad->setRightThumb(x, y);
-        gamepad->sendGamepadReport();
-        
-        if(reportCount % 8 == 0)
-            Serial.println("Setting left thumb to " + String(x) + ", " + String(y));
-            
+    while (millis() - startTime < 8000) {
+        int16_t x = (int16_t)(cos((float)millis() / 1000.0f) * XBOX_STICK_MAX);
+        int16_t y = (int16_t)(sin((float)millis() / 1000.0f) * XBOX_STICK_MAX);
+        gamepad->leftStick().set(x, y);
+        gamepad->rightStick().set(x, y);
+        gamepad->sendReport();
         delay(8);
     }
 }
