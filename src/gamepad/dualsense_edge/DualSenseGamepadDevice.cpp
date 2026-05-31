@@ -68,6 +68,16 @@ void DualsenseEdgeGamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristi
     // and for inspecting reserved regions we don't parse into named fields.
     ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, data, len, ESP_LOG_DEBUG);
 
+    // Auth challenge (0xF0): PS5 sends the challenge for the DualSense to sign.
+    if (_device && pCharacteristic == _device->getAuthPayloadChar()) {
+        ESP_LOGI(LOG_TAG, "Auth challenge received (%d bytes)", (int)len);
+        DsAuthPayload ap{};
+        ap.len = len < sizeof(ap.data) ? len : sizeof(ap.data);
+        memcpy(ap.data, data, ap.len);
+        _device->onAuthChallenge.fire(ap);
+        return;
+    }
+
     if (len < 47) {
         ESP_LOGW(LOG_TAG, "Output report too small: %d bytes", len);
     }
@@ -161,6 +171,9 @@ DualsenseEdgeGamepadDevice::DualsenseEdgeGamepadDevice() :
     _firmwareInfo(nullptr),
     _pairingInfo (nullptr),
     _btPatchInfo (nullptr),
+    _authF0      (nullptr),
+    _authF1      (nullptr),
+    _authF2      (nullptr),
     m_pCrcTable  (nullptr)
 {
     _inputReport.bt  = 0x01;  // BLE header: HasHID=1 (contains state data)
@@ -213,6 +226,9 @@ DualsenseEdgeGamepadDevice::DualsenseEdgeGamepadDevice(DualsenseEdgeControllerDe
     _firmwareInfo(nullptr),
     _pairingInfo (nullptr),
     _btPatchInfo (nullptr),
+    _authF0      (nullptr),
+    _authF1      (nullptr),
+    _authF2      (nullptr),
     m_pCrcTable  (nullptr)
 {
     _inputReport.bt  = 0x01;  // BLE header: HasHID=1 (contains state data)
@@ -263,6 +279,23 @@ void DualsenseEdgeGamepadDevice::init(NimBLEHIDDevice* hid)
     _pairingInfo->setCallbacks(_callbacks);
     _btPatchInfo  = hid->getFeatureReport(DUALSENSE_BT_PATCH_REPORT_ID);
     _btPatchInfo->setCallbacks(_callbacks);
+
+    // Auth forwarding: 0xF0 (challenge from PS5), 0xF1 (nonce to PS5), 0xF2 (state to PS5).
+    // Zero-initialise F1/F2 so PS5 gets a stable "not ready" response until the DualSense signs.
+    _authF0 = hid->getFeatureReport(0xF0);
+    _authF0->setCallbacks(_callbacks);
+    _authF1 = hid->getFeatureReport(0xF1);
+    _authF1->setCallbacks(_callbacks);
+    {
+        uint8_t zeros[63] = {};
+        _authF1->setValue(zeros, sizeof(zeros));
+    }
+    _authF2 = hid->getFeatureReport(0xF2);
+    _authF2->setCallbacks(_callbacks);
+    {
+        uint8_t zeros[52] = {};
+        _authF2->setValue(zeros, sizeof(zeros));
+    }
 
     setCharacteristics(input, output);
 
@@ -605,6 +638,14 @@ void DualsenseEdgeGamepadDevice::setUsbPlugged(bool plugged)
     if (_config->getAutoReport()) sendReport();
 }
 
+void DualsenseEdgeGamepadDevice::setAuthNonce(const uint8_t* data, size_t len) {
+    if (_authF1) _authF1->setValue(data, len);
+}
+
+void DualsenseEdgeGamepadDevice::setAuthSigningState(const uint8_t* data, size_t len) {
+    if (_authF2) _authF2->setValue(data, len);
+}
+
 void DualsenseEdgeGamepadDevice::buildFeatureReportWithCrc(
     uint8_t reportId, const uint8_t* payload, size_t payloadSize,
     uint8_t* outBuffer, size_t outSize)
@@ -673,6 +714,12 @@ void DualsenseEdgeGamepadDevice::populateFeatureReportOnRead(NimBLECharacteristi
         buildFeatureReportWithCrc(DUALSENSE_BT_PATCH_REPORT_ID,
             payload, sizeof(payload), buf, DUALSENSE_BT_PATCH_REPORT_SIZE);
         pCharacteristic->setValue(buf, DUALSENSE_BT_PATCH_REPORT_SIZE);
+    } else if (pCharacteristic == _authF1) {
+        ESP_LOGI(LOG_TAG, "Host reading auth nonce (F1)");
+        // Value was pre-set by setAuthNonce(); nothing to regenerate.
+    } else if (pCharacteristic == _authF2) {
+        ESP_LOGI(LOG_TAG, "Host reading auth signing state (F2)");
+        // Value was pre-set by setAuthSigningState(); nothing to regenerate.
     }
 }
 

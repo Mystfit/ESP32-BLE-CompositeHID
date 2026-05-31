@@ -917,6 +917,12 @@ struct IAdaptiveTrigger : public IAnalogTrigger {
     Signal<DualsenseGamepadOutputReportData::ParsedTriggerEffect> onEffect;
 };
 
+// Payload of the PS5 auth challenge (0xF0 feature report write from host).
+struct DsAuthPayload {
+    uint8_t data[64];
+    size_t  len;
+};
+
 // AdaptiveTriggerImpl — concrete IAdaptiveTrigger backed by a uint8_t field
 class AdaptiveTriggerImpl final : public IAdaptiveTrigger {
     uint8_t& _field;
@@ -1074,6 +1080,14 @@ public:
     void sendPairingInfoReport(bool defer = false);
     void populateFeatureReportOnRead(NimBLECharacteristic* pCharacteristic);
 
+    // PS5 auth forwarding — fires when PS5 writes the auth challenge (0xF0).
+    Signal<DsAuthPayload> onAuthChallenge;
+
+    // Set the signed-nonce (0xF1) response that PS5 will read back.
+    void setAuthNonce(const uint8_t* data, size_t len);
+    // Set the signing-state (0xF2) response that PS5 will read back.
+    void setAuthSigningState(const uint8_t* data, size_t len);
+
     // Characteristic accessors used by callbacks
     NimBLECharacteristic* getInputChar()          { return getInput(); }
     NimBLECharacteristic* getOutputChar()         { return getOutput(); }
@@ -1082,6 +1096,9 @@ public:
     NimBLECharacteristic* getFirmwareInfo() const { return _firmwareInfo; }
     NimBLECharacteristic* getPairingInfo() const  { return _pairingInfo; }
     NimBLECharacteristic* getBtPatchInfo() const  { return _btPatchInfo; }
+    NimBLECharacteristic* getAuthPayloadChar() const { return _authF0; }
+    NimBLECharacteristic* getAuthNonceChar()   const { return _authF1; }
+    NimBLECharacteristic* getAuthStateChar()   const { return _authF2; }
 
 private:
     void sendGamepadReportImpl();
@@ -1124,6 +1141,9 @@ private:
     NimBLECharacteristic* _firmwareInfo;
     NimBLECharacteristic* _pairingInfo;
     NimBLECharacteristic* _btPatchInfo;
+    NimBLECharacteristic* _authF0;  // 0xF0: PS5 writes auth challenge here
+    NimBLECharacteristic* _authF1;  // 0xF1: PS5 reads signed nonce from here
+    NimBLECharacteristic* _authF2;  // 0xF2: PS5 reads signing state from here
     uint32_t crc32_le(unsigned int crc, unsigned char const* buf, unsigned int len);
     void generate_crc_table(uint32_t* crcTable);
     uint32_t* m_pCrcTable;
