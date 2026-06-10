@@ -26,12 +26,11 @@
         "espressif32"
     ],
     "headers": [
+        "BleGamepad.h",
         "BleCompositeHID.h",
         "GamepadDevice.h",
         "KeyboardDevice.h",
-        "MouseDevice.h",
-        "XboxGamepadDevice.h",
-        "DualSenseGamepadDevice.h"
+        "MouseDevice.h"
     ],
     "examples": [
         {
@@ -62,11 +61,10 @@
         }
     ],
     "build": {
-        "srcDir": ".",
+        "srcDir": "src",
         "srcFilter": [
-            "+<./*.c>",
-            "+<./*.cpp>",
-            "+<./*.h>",
+            "+<**/*.c>",
+            "+<**/*.cpp>",
             "-<examples/**/*>"
         ]
     }

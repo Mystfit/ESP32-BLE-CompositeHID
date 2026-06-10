@@ -6,6 +6,10 @@
 
 BleCompositeHID  KEYWORD1
 BleCompositeHIDConfiguration KEYWORD1
+SteamController2026GamepadDevice KEYWORD1
+SteamController2026DeviceConfiguration KEYWORD1
+SteamController2026InputReport KEYWORD1
+SteamController2026OutputReport KEYWORD1
 
 #######################################
 # Methods and Functions
@@ -76,6 +80,19 @@ setIncludeSteering KEYWORD2
 setWhichSimulationControls KEYWORD2
 resetButtons KEYWORD2
 setBatteryLevel KEYWORD2
+setButtons KEYWORD2
+getButtons KEYWORD2
+setLeftStick KEYWORD2
+setRightStick KEYWORD2
+setLeftPad KEYWORD2
+setRightPad KEYWORD2
+releaseLeftPad KEYWORD2
+releaseRightPad KEYWORD2
+setGyro KEYWORD2
+setAccel KEYWORD2
+setQuaternion KEYWORD2
+sendGamepadReport KEYWORD2
+resetInputs KEYWORD2
 pressSpecialButton KEYWORD2
 releaseSpecialButton KEYWORD2
 pressStart KEYWORD2

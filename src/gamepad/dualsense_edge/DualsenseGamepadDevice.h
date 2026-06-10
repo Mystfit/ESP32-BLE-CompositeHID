@@ -12,6 +12,7 @@
 #include "DualsenseDescriptors.h"
 #include "DualsenseGamepadConfiguration.h"
 #include "GamepadDevice.h"
+#include "gamepad/interface/GamepadComponents.h"
 // Button bitmasks
 #define DUALSENSE_BUTTON_Y 0x08
 #define DUALSENSE_BUTTON_B 0x04
@@ -48,13 +49,16 @@
 // Dpad values
 
 // Dpad bitflags
-enum DualsenseDpadFlags : uint8_t {
-    NONE = 0x08,
+enum class DualsenseDpadFlags : uint8_t {
+    NONE  = 0x08,
     NORTH = 0x00,
-    EAST = 0x02,
+    EAST  = 0x02,
     SOUTH = 0x04,
-    WEST = 0x08
+    WEST  = 0x08
 };
+constexpr DualsenseDpadFlags operator|(DualsenseDpadFlags a, DualsenseDpadFlags b) {
+    return static_cast<DualsenseDpadFlags>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
 
 // Trigger range
 #define DUALSENSE_TRIGGER_MIN 0
@@ -67,6 +71,14 @@ enum DualsenseDpadFlags : uint8_t {
 // Charging status range (high nibble of status byte)
 #define DUALSENSE_CHARGING_MIN 0
 #define DUALSENSE_CHARGING_MAX 15
+
+// Status2 byte (byte 54 of input report) bit masks: peripheral/connection state.
+// From community reverse-engineering of DS5 BT captures; not in Linux hid-playstation.c.
+#define DUALSENSE_STATUS2_HEADPHONES_PLUGGED (1 << 0)  // 3.5 mm headset jack occupied
+#define DUALSENSE_STATUS2_HEADPHONE_MIC      (1 << 1)  // headset has an inline microphone
+#define DUALSENSE_STATUS2_MUTE_ACTIVE        (1 << 2)  // mute button is currently engaged
+#define DUALSENSE_STATUS2_USB_PLUGGED        (1 << 4)  // USB data cable connected
+#define DUALSENSE_STATUS2_HAPTICS_INIT       (1 << 7)  // haptic subsystem initialised
 
 // Thumbstick range
 #define DUALSENSE_STICK_MIN -127
@@ -142,11 +154,11 @@ enum DsTriggerEffectSubtype : uint8_t {
 };
 
 // Forwards
-class DualsenseGamepadDevice;
+class DualsenseEdgeGamepadDevice;
 
-class DualsenseGamepadCallbacks : public NimBLECharacteristicCallbacks {
+class DualsenseEdgeGamepadCallbacks : public NimBLECharacteristicCallbacks {
 public:
-    DualsenseGamepadCallbacks(DualsenseGamepadDevice* device);
+    DualsenseEdgeGamepadCallbacks(DualsenseEdgeGamepadDevice* device);
 
     void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
     void onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override;
@@ -154,7 +166,7 @@ public:
     void onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue) override;
 
 private:
-    DualsenseGamepadDevice* _device;
+    DualsenseEdgeGamepadDevice* _device;
 };
 
 // DualSense BT Output Report parsed view (wire format is 78 bytes).
@@ -168,18 +180,18 @@ struct DualsenseGamepadOutputReportData {
     uint8_t tag = 0;                // Byte 2: Should be 0x10 (DS_OUTPUT_TAG)
 
     // Common section starts at byte 3 (47 bytes)
-    uint8_t valid_flag0 = 0;        // Byte 3
-    uint8_t valid_flag1 = 0;        // Byte 4
+    uint8_t valid_flag0 = 0;        // Byte 3: see DS_OUT_FLAG0_* masks
+    uint8_t valid_flag1 = 0;        // Byte 4: see DS_OUT_FLAG1_* masks
     uint8_t motor_right = 0;        // Byte 5: Strong motor
     uint8_t motor_left = 0;         // Byte 6: Weak motor
 
     uint8_t headphone_volume = 0;   // Byte 7
     uint8_t speaker_volume = 0;     // Byte 8
     uint8_t mic_volume = 0;         // Byte 9
-    uint8_t audio_control = 0;      // Byte 10
-    uint8_t mute_button_led = 0;    // Byte 11
+    uint8_t audio_control = 0;      // Byte 10: audio routing flags (bit 0=headphone out, bit 1=speaker out, bit 4=internal mic)
+    uint8_t mute_button_led = 0;    // Byte 11: 0x00=off, 0x01=solid on, 0x02=pulsing
 
-    uint8_t power_save_control = 0; // Byte 12
+    uint8_t power_save_control = 0; // Byte 12: bit 4 (0x10) = disable internal mic to save power
 
     // Adaptive-trigger effect blocks (canonical layout from hid-playstation.c).
     // Each trigger has 1 mode byte + 10 parameter bytes. For DS_TRIGGER_EFFECT_VIBRATION
@@ -193,11 +205,11 @@ struct DualsenseGamepadOutputReportData {
 
     uint8_t audio_control2 = 0;     // Byte 40
 
-    uint8_t valid_flag2 = 0;        // Byte 41
+    uint8_t valid_flag2 = 0;        // Byte 41: see DS_OUT_FLAG2_* masks
     uint8_t reserved3[2] = { 0 };   // Bytes 42-43
 
-    uint8_t lightbar_setup = 0;     // Byte 44
-    uint8_t led_brightness = 0;     // Byte 45
+    uint8_t lightbar_setup = 0;     // Byte 44: 0x01=lightbar on (apply RGB), 0x02=lightbar off/fade out
+    uint8_t led_brightness = 0;     // Byte 45: 0=high, 1=medium, 2=low
     uint8_t player_leds = 0;        // Byte 46
     uint8_t lightbar_red = 0;       // Byte 47
     uint8_t lightbar_green = 0;     // Byte 48
@@ -812,20 +824,28 @@ struct DualsenseGamepadInputReportData {
     int16_t accel_z = 0;            // bytes 26-27
     uint32_t timestamp = 0x7621DD40;// bytes 28-31: sensor timestamp
     uint8_t reserved2 = 0;          // byte 32
-    uint8_t touchpoint_l_contact = 0x80;  // byte 33 (0x80 = no contact)
-    uint16_t touchpoint_l_x : 12;   // bytes 34-35 (low 12 bits across two bytes, packed with y)
-    uint16_t touchpoint_l_y : 12;   // byte 36 (high 12 bits)
-    uint8_t touchpoint_r_contact = 0x80;  // byte 37
-    uint16_t touchpoint_r_x : 12;   // bytes 38-39
-    uint16_t touchpoint_r_y : 12;   // byte 40
-    uint8_t data_41_53[12];         // bytes 41-52
+    uint8_t touchpoint_0_contact = 0x80;  // byte 33 (0x80 = no contact)
+    uint16_t touchpoint_0_x : 12;   // bytes 34-35 (low 12 bits across two bytes, packed with y)
+    uint16_t touchpoint_0_y : 12;   // byte 36 (high 12 bits)
+    uint8_t touchpoint_1_contact = 0x80;  // byte 37
+    uint16_t touchpoint_1_x : 12;   // bytes 38-39
+    uint16_t touchpoint_1_y : 12;   // byte 40
+    uint8_t touchpad_timestamp = 0;          // byte 41: touchpad packet counter (increments each report)
+    // bytes 42-44: L2 adaptive trigger state feedback (reported back to host).
+    // [0] bits 0-3: active effect ID; bit 4: trigger currently actuating. [1]: position readback (0-255). [2]: reserved.
+    uint8_t l2_trigger_feedback[3] = {};    // bytes 42-44
+    // bytes 45-47: R2 adaptive trigger state feedback, same layout as l2_trigger_feedback.
+    uint8_t r2_trigger_feedback[3] = {};    // bytes 45-47
+    uint8_t data_48_52[5] = {};             // bytes 48-52: unknown, zero in all known captures
 
     // byte 53: battery/status[0]. Low nibble = capacity 0-10, high nibble = charging state.
     // 0x0A = 100% discharging (normal). 0xFF would read as capacity=15 + charging=0xF (error).
-    uint8_t status = 0x0A;          // byte 53
+    uint8_t status = 0x0A;                  // byte 53
 
-    uint8_t data_54_74[18];         // bytes 54-71
-    uint8_t reserved3 = 0x00;       // byte 72
+    // byte 54: peripheral/connection status. See DUALSENSE_STATUS2_* masks.
+    uint8_t status2 = 0x00;                 // byte 54
+    uint8_t data_55_71[17] = {};            // bytes 55-71: Linux reserved4[10] + BT frame padding[7], zeros
+    uint8_t reserved3 = 0x00;              // byte 72
     uint32_t crc32 = 0;             // bytes 73-76
 } __attribute__((packed));
 
@@ -870,7 +890,7 @@ static_assert(sizeof(DualsenseGamepadPairingReportdata) == DUALSENSE_PAIRING_INF
     return DUALSENSE_BUTTON_DPAD_NONE;
 }
 
-[[maybe_unused]] static String dPadDirectionName(uint8_t direction)
+[[maybe_unused]] static String dualsenseDPadDirectionName(uint8_t direction)
 {
     if (direction == DUALSENSE_BUTTON_DPAD_NORTH)
         return "NORTH";
@@ -891,54 +911,184 @@ static_assert(sizeof(DualsenseGamepadPairingReportdata) == DUALSENSE_PAIRING_INF
     return "NONE";
 }
 
-class DualsenseGamepadDevice : public BaseCompositeDevice {
+// IAdaptiveTrigger — analog trigger that receives effect commands from the host.
+// Defined here (after ParsedTriggerEffect) to avoid circular includes.
+struct IAdaptiveTrigger : public IAnalogTrigger {
+    Signal<DualsenseGamepadOutputReportData::ParsedTriggerEffect> onEffect;
+};
+
+// Payload of the PS5 auth challenge (0xF0 feature report write from host).
+struct DsAuthPayload {
+    uint8_t data[64];
+    size_t  len;
+};
+
+// AdaptiveTriggerImpl — concrete IAdaptiveTrigger backed by a uint8_t field
+class AdaptiveTriggerImpl final : public IAdaptiveTrigger {
+    uint8_t& _field;
 public:
-    DualsenseGamepadDevice();
-    DualsenseGamepadDevice(DualsenseGamepadDeviceConfiguration* config);
-    ~DualsenseGamepadDevice();
+    explicit AdaptiveTriggerImpl(uint8_t& field) : _field(field) {}
+    void     setValue(uint16_t v) override { _field = v > 255 ? 255 : static_cast<uint8_t>(v); }
+    uint16_t getValue()    const override  { return _field; }
+    uint16_t getMinValue() const override  { return 0; }
+    uint16_t getMaxValue() const override  { return 255; }
+    void press()   override { _field = 255; }
+    void release() override { _field = 0;   }
+    bool isPressed() const override { return _field == 255; }
+};
+
+// BatteryImpl — IBattery backed by the DualSense status byte in the input report.
+// Low nibble = capacity level (0-10), high nibble = charging state.
+class BatteryImpl final : public IBattery {
+    uint8_t& _status;
+public:
+    explicit BatteryImpl(uint8_t& status) : _status(status) {}
+    uint8_t getLevel() const override {
+        return static_cast<uint8_t>(((_status & 0x0F) * 100) / 10);
+    }
+    bool isCharging() const override { return ((_status >> 4) & 0x0F) != 0; }
+    void setLevel(uint8_t pct) override {
+        uint8_t nibble = static_cast<uint8_t>((pct * 10) / 100);
+        if (nibble > 10) nibble = 10;
+        _status = static_cast<uint8_t>((_status & 0xF0) | (nibble & 0x0F));
+    }
+    void setCharging(bool charging) override {
+        _status = static_cast<uint8_t>((_status & 0x0F) | (charging ? 0x10 : 0x00));
+    }
+};
+
+// =============================================================================
+// IDualsenseEdgeGamepad — named interface for DualSense Edge controllers
+// =============================================================================
+struct IDualsenseEdgeGamepad {
+    // Face buttons (PlayStation naming)
+    virtual IButton& cross() = 0;
+    virtual IButton& circle() = 0;
+    virtual IButton& square() = 0;
+    virtual IButton& triangle() = 0;
+    // Shoulder buttons
+    virtual IButton& l1() = 0;
+    virtual IButton& r1() = 0;
+    // Stick clicks
+    virtual IButton& l3() = 0;
+    virtual IButton& r3() = 0;
+    // Edge paddle buttons
+    virtual IButton& l4() = 0;
+    virtual IButton& r4() = 0;
+    virtual IButton& l5() = 0;
+    virtual IButton& r5() = 0;
+    // Special buttons
+    virtual IButton& select() = 0;
+    virtual IButton& start() = 0;
+    virtual IButton& home() = 0;
+    virtual IButton& touchpadButton() = 0;
+    virtual IButton& share() = 0;
+    virtual IButton& mute() = 0;
+    // Adaptive triggers (IAdaptiveTrigger exposes onEffect Signal)
+    virtual IAdaptiveTrigger& leftTrigger() = 0;
+    virtual IAdaptiveTrigger& rightTrigger() = 0;
+    // Sticks
+    virtual IAnalogStick& leftStick() = 0;
+    virtual IAnalogStick& rightStick() = 0;
+    // DPad
+    virtual IDPad& dpad() = 0;
+    // Battery (device → host)
+    virtual IBattery& battery() = 0;
+    // Output components (host → device, Signal-based)
+    virtual IRumbleMotor&    rumble()          = 0;
+    virtual IPlayerIndicator& playerIndicator() = 0;
+    virtual ILight&          light()           = 0;
+    virtual ISpeaker&        speaker()         = 0;
+    virtual IMicrophone&     microphone()      = 0;
+    // Lifecycle
+    virtual void sendReport(bool defer = false) = 0;
+    virtual void resetInputs() = 0;
+    virtual ~IDualsenseEdgeGamepad() = default;
+};
+
+// =============================================================================
+// DualsenseEdgeGamepadDevice
+// =============================================================================
+class DualsenseEdgeGamepadDevice : public BaseCompositeDevice, public IDualsenseEdgeGamepad {
+    DualsenseGamepadInputReportData _inputReport;   // declared first — components hold refs into it
+
+public:
+    DualsenseEdgeGamepadDevice();
+    DualsenseEdgeGamepadDevice(DualsenseEdgeControllerDeviceConfiguration* config);
+    ~DualsenseEdgeGamepadDevice();
 
     void init(NimBLEHIDDevice* hid) override;
     const BaseCompositeDeviceConfiguration* getDeviceConfig() const override;
 
-    Signal<DualsenseGamepadOutputReportData> onReceivedOutputReport;
+    // IDualsenseEdgeGamepad
+    IButton& cross()          override { return _cross; }
+    IButton& circle()         override { return _circle; }
+    IButton& square()         override { return _square; }
+    IButton& triangle()       override { return _triangle; }
+    IButton& l1()             override { return _l1; }
+    IButton& r1()             override { return _r1; }
+    IButton& l3()             override { return _l3; }
+    IButton& r3()             override { return _r3; }
+    IButton& l4()             override { return _l4; }
+    IButton& r4()             override { return _r4; }
+    IButton& l5()             override { return _l5; }
+    IButton& r5()             override { return _r5; }
+    IButton& select()         override { return _select; }
+    IButton& start()          override { return _start; }
+    IButton& home()           override { return _home; }
+    IButton& touchpadButton() override { return _touchpadBtn; }
+    IButton& share()          override { return _share; }
+    IButton& mute()           override { return _mute; }
+    IAdaptiveTrigger& leftTrigger()  override { return _leftTrigger; }
+    IAdaptiveTrigger& rightTrigger() override { return _rightTrigger; }
+    IAnalogStick& leftStick()   override { return _leftStick; }
+    IAnalogStick& rightStick()  override { return _rightStick; }
+    IDPad& dpad()               override { return _dpad; }
+    IBattery& battery()         override { return _battery; }
+    IRumbleMotor&    rumble()          override { return _rumble; }
+    IPlayerIndicator& playerIndicator() override { return _playerIndicator; }
+    ILight&          light()           override { return _light; }
+    ISpeaker&        speaker()         override { return _speaker; }
+    IMicrophone&     microphone()      override { return _microphone; }
+    void sendReport(bool defer = false) override;
+    void resetInputs() override;
 
-    // Input Controls
-    void resetInputs();
-    void press(uint32_t button = DUALSENSE_BUTTON_A);
-    void release(uint32_t button = DUALSENSE_BUTTON_A);
-    bool isPressed(uint32_t button = DUALSENSE_BUTTON_A);
-    void setLeftThumb(int8_t x = 0, int8_t y = 0);
-    void setRightThumb(int8_t x = 0, int8_t y = 0);
-    void setLeftTrigger(uint8_t rX = 0);
-    void setRightTrigger(uint8_t rY = 0);
-    void setTriggers(uint8_t rX = 0, uint8_t rY = 0);
-    void pressDPadDirection(uint8_t direction = 0);
-    void pressDPadDirectionFlag(DualsenseDpadFlags direction = DualsenseDpadFlags::NONE);
-    void releaseDPad();
-    bool isDPadPressed(uint8_t direction = 0);
-    bool isDPadPressedFlag(DualsenseDpadFlags direction);
-    void pressShare();
-    void releaseShare();
-    void setLeftTouchpad(uint16_t x, uint16_t y);
-    void setRightTouchpad(uint16_t x, uint16_t y);
-    void releaseLeftTouchpad();
-    void releaseRightTouchpad();
+    // Touchpad — slot-based multi-touch (contact byte encodes touch ID)
+    // Returns slot index (0 or 1) on success, -1 if both slots are occupied.
+    int8_t touchpadStartTouch(uint16_t x, uint16_t y);
+    void touchpadUpdatePosition(uint16_t x, uint16_t y, uint8_t slotIndex);
+    void touchpadStopTouch(uint8_t slotIndex);
+    // IMU
     void setAccel(int16_t x, int16_t y, int16_t z);
     void setGyro(int16_t pitch, int16_t yaw, int16_t roll);
-    void setBatteryLevel(uint8_t level);
-    void setChargingStatus(bool charging);
-    void sendGamepadReport(bool defer = false);
-    void sendFirmInfoReport(bool defer = false);
-    void sendCalibrationReport(bool defer = false);
-    void sendPairingInfoReport(bool defer = false);
+    // effectFlags (community RE, not in Linux driver): bits 0-3 = active effect type
+    //   (0=none, 1=feedback/resistance, 2=weapon snap, 6=vibration); bit 4 = trigger in active zone.
+    // position: actuator readback 0-255. Host does not use these for gameplay; zeros are safe.
+    void setL2TriggerFeedback(uint8_t effectFlags, uint8_t position, uint8_t reserved = 0);
+    void setR2TriggerFeedback(uint8_t effectFlags, uint8_t position, uint8_t reserved = 0);
+    // Peripheral/connection status reported in input report status2 byte
+    void setHeadphonesPlugged(bool plugged);
+    void setHeadphoneMic(bool connected);
+    void setMuteActive(bool active);
+    void setUsbPlugged(bool plugged);
     void timestamp();
     void seq();
 
-    // Called by callback when host reads a feature report - populates value before read completes
+    // Feature report helpers
+    void sendFirmInfoReport(bool defer = false);
+    void sendCalibrationReport(bool defer = false);
+    void sendPairingInfoReport(bool defer = false);
     void populateFeatureReportOnRead(NimBLECharacteristic* pCharacteristic);
 
-    // Characteristic accessors used by DualsenseGamepadCallbacks to identify
-    // which pipe a read/subscribe came from when logging.
+    // PS5 auth forwarding — fires when PS5 writes the auth challenge (0xF0).
+    Signal<DsAuthPayload> onAuthChallenge;
+
+    // Set the signed-nonce (0xF1) response that PS5 will read back.
+    void setAuthNonce(const uint8_t* data, size_t len);
+    // Set the signing-state (0xF2) response that PS5 will read back.
+    void setAuthSigningState(const uint8_t* data, size_t len);
+
+    // Characteristic accessors used by callbacks
     NimBLECharacteristic* getInputChar()          { return getInput(); }
     NimBLECharacteristic* getOutputChar()         { return getOutput(); }
     NimBLECharacteristic* getMinimalInput() const { return _minimalInput; }
@@ -946,28 +1096,57 @@ public:
     NimBLECharacteristic* getFirmwareInfo() const { return _firmwareInfo; }
     NimBLECharacteristic* getPairingInfo() const  { return _pairingInfo; }
     NimBLECharacteristic* getBtPatchInfo() const  { return _btPatchInfo; }
+    NimBLECharacteristic* getAuthPayloadChar() const { return _authF0; }
+    NimBLECharacteristic* getAuthNonceChar()   const { return _authF1; }
+    NimBLECharacteristic* getAuthStateChar()   const { return _authF2; }
 
 private:
     void sendGamepadReportImpl();
     void sendFirmInfoReportImpl();
     void sendCalibrationReportImpl();
     void sendPairingInfoReportImpl();
-    DualsenseGamepadInputReportData _inputReport;
-    DualsenseGamepadPairingReportdata _pairingReport;
     void buildFeatureReportWithCrc(uint8_t reportId, const uint8_t* payload,
-        size_t payloadSize, uint8_t* outBuffer, size_t outSize);
-    DualsenseGamepadDeviceConfiguration* _config;
+                                    size_t payloadSize, uint8_t* outBuffer, size_t outSize);
+
+    DSButtonImpl _cross, _circle, _square, _triangle;
+    DSButtonImpl _l1, _r1;
+    DSButtonImpl _select, _start, _home;
+    DSButtonImpl _l3, _r3;
+    DSButtonImpl _touchpadBtn, _share, _mute;
+    DSButtonImpl _l4, _r4, _l5, _r5;
+
+    AdaptiveTriggerImpl _leftTrigger;
+    AdaptiveTriggerImpl _rightTrigger;
+
+    AnalogStickImpl<uint8_t, 0x80> _leftStick;
+    AnalogStickImpl<uint8_t, 0x80> _rightStick;
+
+    NibbleHatDPadImpl _dpad;
+    uint8_t _touchPointId[2] = {0};
+    bool _touchPointActive[2] = {false};
+    uint8_t _nextTouchId = 1;
+    BatteryImpl      _battery;
+    ILight           _light;
+    IPlayerIndicator _playerIndicator;
+    IRumbleMotor     _rumble;
+    ISpeaker         _speaker;
+    IMicrophone      _microphone;
+
+    DualsenseGamepadPairingReportdata    _pairingReport;
+    DualsenseEdgeControllerDeviceConfiguration* _config;
     NimBLECharacteristic* _extra_input;
     NimBLECharacteristic* _minimalInput;  // 0x01 9-byte Generic Desktop input report (BLE GAP requirement)
-    DualsenseGamepadCallbacks* _callbacks;
+    DualsenseEdgeGamepadCallbacks* _callbacks;
     NimBLECharacteristic* _calibration;
     NimBLECharacteristic* _firmwareInfo;
     NimBLECharacteristic* _pairingInfo;
     NimBLECharacteristic* _btPatchInfo;
+    NimBLECharacteristic* _authF0;  // 0xF0: PS5 writes auth challenge here
+    NimBLECharacteristic* _authF1;  // 0xF1: PS5 reads signed nonce from here
+    NimBLECharacteristic* _authF2;  // 0xF2: PS5 reads signing state from here
     uint32_t crc32_le(unsigned int crc, unsigned char const* buf, unsigned int len);
     void generate_crc_table(uint32_t* crcTable);
     uint32_t* m_pCrcTable;
-    // Threading
     std::mutex _mutex;
 };
 
