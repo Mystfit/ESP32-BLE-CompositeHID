@@ -43,16 +43,21 @@ DualsenseEdgeGamepadCallbacks::DualsenseEdgeGamepadCallbacks(DualsenseEdgeGamepa
 void DualsenseEdgeGamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo)
 {
     [[maybe_unused]] uint16_t handle = pCharacteristic->getHandle();
-    const NimBLEAttValue& value = pCharacteristic->getValue();
-    size_t len = value.size();
 
-    if (len == 0) {
-        ESP_LOGD(LOG_TAG, "*** onWrite handle=%d size=0 connHandle=%d ***",
-            handle, connInfo.getConnHandle());
-        return;
+    // Copy raw bytes immediately so NimBLE's internal value buffer is no longer referenced.
+    // The NimBLEAttValue holds m_attr_value on the heap; keeping a reference to it pins
+    // that allocation for the lifetime of this callback and prevents timely recycling.
+    uint8_t buf[77];
+    size_t len;
+    {
+        const NimBLEAttValue& value = pCharacteristic->getValue();
+        len = value.size();
+        if (len == 0) return;
+        if (len > sizeof(buf)) len = sizeof(buf);
+        memcpy(buf, value.data(), len);
     }
+    const uint8_t* data = buf;
 
-    const uint8_t* data = value.data();
     [[maybe_unused]] const char* role = "unknown";
     if (_device) {
         if (pCharacteristic == _device->getOutputChar())        role = "OUTPUT-0x31";
@@ -60,13 +65,11 @@ void DualsenseEdgeGamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristi
         else if (pCharacteristic == _device->getPairingInfo())  role = "FEATURE-0x09";
         else if (pCharacteristic == _device->getFirmwareInfo()) role = "FEATURE-0x20";
         else if (pCharacteristic == _device->getBtPatchInfo())  role = "FEATURE-0x22";
+        else if (pCharacteristic == _device->getAuthPayloadChar()) role = "FEATURE-0xF0";
     }
-    ESP_LOGD(LOG_TAG, "*** onWrite: role=%s handle=%d size=%d connHandle=%d ***",
-        role, handle, len, connInfo.getConnHandle());
-    // Full hex dump so we can see exactly what the host is writing - critical
-    // for confirming whether tools like DSX are sending output reports at all,
-    // and for inspecting reserved regions we don't parse into named fields.
-    ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, data, len, ESP_LOG_DEBUG);
+    // ESP_LOGI(LOG_TAG, "onWrite: role=%s handle=%d size=%d", role, handle, (int)len);
+
+    // ESP_LOG_BUFFER_HEX_LEVEL(LOG_TAG, data, len, ESP_LOG_DEBUG);
 
     // Auth challenge (0xF0): PS5 sends the challenge for the DualSense to sign.
     if (_device && pCharacteristic == _device->getAuthPayloadChar()) {
@@ -117,10 +120,20 @@ void DualsenseEdgeGamepadCallbacks::onWrite(NimBLECharacteristic* pCharacteristi
 
 void DualsenseEdgeGamepadCallbacks::onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo)
 {
-    [[maybe_unused]] uint16_t handle = pCharacteristic->getHandle();
-    ESP_LOGD(LOG_TAG, "*** onRead handle=%d connHandle=%d ***", handle, connInfo.getConnHandle());
-    // Populate feature reports on read so Steam gets valid data
-    // This is called BEFORE the data is sent to the host
+    uint16_t handle = pCharacteristic->getHandle();
+    const char* role = "unknown";
+    if (_device) {
+        if      (pCharacteristic == _device->getInputChar())        role = "INPUT-0x31";
+        else if (pCharacteristic == _device->getOutputChar())      role = "OUTPUT-0x31";
+        else if (pCharacteristic == _device->getCalibration())     role = "FEATURE-0x05";
+        else if (pCharacteristic == _device->getPairingInfo())     role = "FEATURE-0x09";
+        else if (pCharacteristic == _device->getFirmwareInfo())    role = "FEATURE-0x20";
+        else if (pCharacteristic == _device->getBtPatchInfo())     role = "FEATURE-0x22";
+        else if (pCharacteristic == _device->getAuthPayloadChar()) role = "FEATURE-0xF0";
+        else if (pCharacteristic == _device->getAuthNonceChar())   role = "FEATURE-0xF1";
+        else if (pCharacteristic == _device->getAuthStateChar())   role = "FEATURE-0xF2";
+    }
+    ESP_LOGI(LOG_TAG, "onRead: role=%s handle=%d connHandle=%d", role, handle, connInfo.getConnHandle());
     _device->populateFeatureReportOnRead(pCharacteristic);
 }
 
@@ -189,6 +202,7 @@ DualsenseEdgeGamepadDevice::DualsenseEdgeGamepadDevice() :
     _inputReport.status    = 0x0A;  // 100% battery, discharging
     // Controller at rest: ~1g on the axis facing down.
     _inputReport.accel_y   = -DUALSENSE_ACC_RES_PER_G;
+    _inputReport.data_48_52[1] = 0x04;  // profile 1 active, mode bits = 0 (normal)
 
 }
 
@@ -244,6 +258,7 @@ DualsenseEdgeGamepadDevice::DualsenseEdgeGamepadDevice(DualsenseEdgeControllerDe
     _inputReport.status    = 0x0A;  // 100% battery, discharging
     // Controller at rest: ~1g on the axis facing down.
     _inputReport.accel_y   = -DUALSENSE_ACC_RES_PER_G;
+    _inputReport.data_48_52[1] = 0x04;  // profile 1 active, mode bits = 0 (normal)
 
 }
 
@@ -376,6 +391,7 @@ void DualsenseEdgeGamepadDevice::resetInputs()
     _inputReport.timestamp = 0x7621DD40;
     _inputReport.status    = 0x0A;
     _inputReport.accel_y   = -DUALSENSE_ACC_RES_PER_G;
+    _inputReport.data_48_52[1] = 0x04;  // profile 1 active, mode bits = 0 (normal)
     _touchPointActive[0] = false;
     _touchPointActive[1] = false;
 }
