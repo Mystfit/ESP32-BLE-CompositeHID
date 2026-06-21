@@ -14,17 +14,35 @@
  * descriptor, proactively indicating calibration on input subscribe, forcing GATT Service
  * Changed to re-read calibration, and spoofing a Sony Bluetooth OUI.
  *
- * Advanced haptic features (audio-based vibration, adaptive triggers) still require a USB
- * connection — over Bluetooth only basic dual-motor rumble is supported, matching the real
- * DualSense.
+ * Advanced haptic features (audio-based vibration, adaptive triggers) over Bluetooth depend
+ * on the host stack — see HAPTIC AUDIO below.
  *
- * BLE-REACHABLE HAPTIC PROXY:
- * True VCA haptic audio (what DSX calls "BT Haptics" / "Sound Waves") is streamed over the
- * Bluetooth Classic HID interrupt channel via an undocumented Sony firmware path. It does
- * not reach BLE HoGP peripherals. If you want a host-driven haptic signal that DOES survive
- * BLE, the adaptive-trigger "Vibration" effect (DS_TRIGGER_EFFECT_VIBRATION, type 0x26)
- * travels inside the standard 0x31 output report and carries frequency + amplitude. You can
- * drive an external LRA/VCA amplifier from those values — see OnVibrateEvent below.
+ * HAPTIC AUDIO over BLE — what works and what doesn't:
+ *
+ *  - Windows / DSX: empirically does NOT push haptic-audio bytes through the BLE HoGP path.
+ *    DSX's "Haptic Feedback" / "Audio to Haptics" UI explicitly notes the feature is
+ *    USB-only. A live capture (see examples/dualsenseExamples/Dualsense_Haptic_Sniffer)
+ *    confirms: with DSX driving haptics, every BLE output report is a static heartbeat with
+ *    all data fields zero. Windows appears to route VCA audio to BT-Classic HID, which
+ *    BLE peripherals don't expose.
+ *
+ *  - Linux + BlueZ: DOES forward arbitrary 0x31 output report bytes through the HoGP path
+ *    to BLE peripherals. Verified with scripts/ds-haptic-probe.py, which writes synthetic
+ *    78-byte reports to /dev/hidrawN and is received byte-for-byte by the firmware. This
+ *    means a custom Linux host (or any tool that writes via hidraw, à la SAxense
+ *    https://github.com/egormanga/SAxense) CAN deliver haptic audio over BLE.
+ *
+ *  - The library exposes the haptic-audio window via DualsenseGamepadDevice::
+ *    onHapticAudioReceived (fires per 0x31 output report containing the 24-byte audio
+ *    window between common-section and CRC). HapticAudioFrame.samples is interleaved
+ *    8-bit signed PCM, 12 stereo frames per packet. See examples/dualsenseExamples/
+ *    Dualsense_Haptic_I2S for a worked driver that pipes the bytes to an I2S DAC.
+ *
+ * BLE-reachable haptic FALLBACK without audio:
+ *  The adaptive-trigger "Vibration" effect (DS_TRIGGER_EFFECT_VIBRATION, type 0x26) carries
+ *  frequency + amplitude inside the standard 0x31 output report and is set by some hosts
+ *  (and trivially by DSX) regardless of BLE/USB. See OnVibrateEvent below if you want a
+ *  cross-host haptic signal that doesn't depend on a custom Linux writer.
  */
 
 #include <BleConnectionStatus.h>
@@ -46,6 +64,74 @@ BleCompositeHID compositeHID("Libresteishon Edge", "YeaSeb", 100);
 // FunctionSlots must be global to persist after setup() completes
 FunctionSlot<DualsenseGamepadOutputReportData> vibrationSlot(OnVibrateEvent);
 FunctionSlot<DualsenseGamepadOutputReportData> ledSlot(OnLEDEvent);
+
+// --- Haptic-audio verifier --------------------------------------------
+// Counts haptic-audio frames as they arrive and tracks the per-packet peak
+// amplitude. loop() runs an envelope follower over the peaks and drives
+// ledPin via PWM, so the LED brightness tracks audio loudness like a VU
+// meter — bright on loud bursts, dim on quiet, smooth fade between rather
+// than sample-rate flicker. Shares the LED with the rumble visualiser;
+// when haptic audio goes silent the LED is released back to rumble's
+// HIGH-while-motor-on logic (see updateHapticLEDIfDue).
+// Sources that drive this:
+//   - Linux: scripts/ds-haptic-probe.py --pattern sine
+//   - Windows + Unreal-Dualsense (with the upstream PR patches): the
+//     plugin's audio submix listener emits 0x36 audio-haptic reports.
+static volatile uint32_t g_haptic_events       = 0;
+static volatile uint8_t  g_haptic_peak         = 0;   // 0..127 (|int8|)
+static uint32_t          g_last_haptic_event_ms = 0;
+// Freshness timestamp for the rumble visualiser. Updated from OnVibrateEvent
+// whenever a rumble-bearing report carries non-zero motors. If a host (e.g.
+// Unreal-Dualsense quitting) stops sending output reports without first
+// zeroing the motors, motor_left/motor_right would otherwise stay non-zero
+// forever and the LED would stick on rumble colours.
+static volatile uint32_t g_last_rumble_ms        = 0;
+static constexpr uint32_t RUMBLE_FRESHNESS_MS    = 500;
+
+static void OnHapticAudio(HapticAudioFrame frame)
+{
+    if (!frame.samples || frame.sampleCount == 0) return;
+    g_haptic_events++;
+    // Scan both channels and record the peak |sample| for this packet.
+    // Promote to int16 so abs(-128) doesn't overflow int8.
+    int16_t peak = 0;
+    const size_t total = frame.sampleCount * 2;  // stereo interleaved
+    for (size_t i = 0; i < total; ++i) {
+        int16_t s = frame.samples[i];
+        int16_t a = s < 0 ? -s : s;
+        if (a > peak) peak = a;
+    }
+    g_haptic_peak = (peak > 127) ? 127 : (uint8_t)peak;
+    // Only mark haptic active when samples contain real signal. Silent/zero-byte
+    // 0x31 heartbeats always pass the sampleCount guard but have peak=0
+    if (peak > 0)
+        g_last_haptic_event_ms = millis();
+}
+
+FunctionSlot<HapticAudioFrame> hapticSlot(OnHapticAudio);
+
+void HSVtoRGB(int h, int s, int v, byte &r, byte &g, byte &b) {
+    float f_h = h / 60.0;
+    float f_s = s / 100.0;
+    float f_v = v / 100.0;
+
+    float c = f_v * f_s;
+    float x = c * (1 - abs(fmod(f_h, 2) - 1));
+    float m = f_v - c;
+
+    float r_temp, g_temp, b_temp;
+
+    if (h < 60)      { r_temp = c; g_temp = x; b_temp = 0; }
+    else if (h < 120) { r_temp = x; g_temp = c; b_temp = 0; }
+    else if (h < 180) { r_temp = 0; g_temp = c; b_temp = x; }
+    else if (h < 240) { r_temp = 0; g_temp = x; b_temp = c; }
+    else if (h < 300) { r_temp = x; g_temp = 0; b_temp = c; }
+    else             { r_temp = c; g_temp = 0; b_temp = x; }
+
+    r = (r_temp + m) * 255;
+    g = (g_temp + m) * 255;
+    b = (b_temp + m) * 255;
+}
 
 void OnLEDEvent(DualsenseGamepadOutputReportData data)
 {
@@ -85,7 +171,15 @@ void OnLEDEvent(DualsenseGamepadOutputReportData data)
         }
     } 
 
-    if (data.lightbar_red != ledcolor[0] || data.lightbar_green != ledcolor[1] || data.lightbar_blue != ledcolor[2]){
+    // Gate on hasLightbar(): audio-only 0x31/0x36 reports don't carry a
+    // lightbar update, and reading the bytes anyway would let stale/garbage
+    // values shadow whatever colour the host actually picked. The NeoPixel
+    // write is deferred to updateLEDIfDue() so this BLE callback stays free
+    // of hardware writes (see OnVibrateEvent comment + memory note
+    // feedback_ble_callback_logging) — writing here races the loop-thread
+    // NeoPixel and produces flicker / wrong colours.
+    if (data.hasLightbar() &&
+        (data.lightbar_red != ledcolor[0] || data.lightbar_green != ledcolor[1] || data.lightbar_blue != ledcolor[2])) {
         ledcolor[0]=data.lightbar_red;
         ledcolor[1]=data.lightbar_green;
         ledcolor[2]=data.lightbar_blue;
@@ -193,39 +287,435 @@ void OnVibrateEvent(DualsenseGamepadOutputReportData data)
             if(!message.isEmpty()) message += ",";
             message += "rumble_strong_motor:" + String(motor_right);
         }
+        // Stamp every rumble-bearing report (not just changes) so the LED
+        // visualiser can age out a stuck non-zero state if the host quits
+        // without sending zero rumble.
+        if (motor_left > 0 || motor_right > 0)
+            g_last_rumble_ms = millis();
     }
 
-    // Log all adaptive-trigger effects whenever the host sets the effect flags.
+    // Log adaptive-trigger effects only when they actually change. DSX streams
+    // a trigger-effect block in every output report even when nothing changed,
+    // so gate on the decoded (mode + 10 params) differing from the last logged
+    // state to keep the console readable. Cache is per-trigger and persists
+    // across calls.
+    static uint8_t s_last_lt_mode = 0xFF, s_last_rt_mode = 0xFF;
+    static uint8_t s_last_lt_params[10] = {0}, s_last_rt_params[10] = {0};
+
     auto lt = data.leftTrigger();
     auto rt = data.rightTrigger();
-    if (data.hasLeftTriggerEffect()) {
+    if (data.hasLeftTriggerEffect() &&
+        (lt.mode != s_last_lt_mode || memcmp(lt.raw_params, s_last_lt_params, 10) != 0)) {
+        s_last_lt_mode = lt.mode;
+        memcpy(s_last_lt_params, lt.raw_params, 10);
         if(!message.isEmpty()) message += ",";
-        message += "L2=" + formatTriggerEffect(lt);
+        message += "adaptive_trigger_L2=" + formatTriggerEffect(lt);
     }
-    if (data.hasRightTriggerEffect()) {
+    if (data.hasRightTriggerEffect() &&
+        (rt.mode != s_last_rt_mode || memcmp(rt.raw_params, s_last_rt_params, 10) != 0)) {
+        s_last_rt_mode = rt.mode;
+        memcpy(s_last_rt_params, rt.raw_params, 10);
         if(!message.isEmpty()) message += ",";
-        message += " R2=" + formatTriggerEffect(rt);
+        message += "adaptive_trigger_R2=" + formatTriggerEffect(rt);
     }
-
-    // Raw byte dump for active trigger effects — helps verify decoded values.
-    // Shows mode + p[0..9]; for Vibration: freq is at p[9] (single) or p[8] (multi).
-    // if (data.hasLeftTriggerEffect()) {
-    //     String d = " L2 raw: " + String(lt.mode);
-    //     for (int i = 0; i < 10; ++i) d += "," + String(lt.raw_params[i]);
-    //     message += d;
-    // }
-    // if (data.hasRightTriggerEffect()) {
-    //     String d = " R2 raw: " + String(rt.mode);
-    //     for (int i = 0; i < 10; ++i) d += "," + String(rt.raw_params[i]);
-    //     message += d;
-    // }
 
     if(!message.isEmpty()) Serial.println(message);
+    // LED is driven from updateLEDIfDue() in loop() — keep BLE callback
+    // free of hardware writes (see memory note feedback_ble_callback_logging).
+    // Updating motor_left / motor_right above is enough; the loop tick
+    // reads them and writes the LED.
+}
 
-    if (motor_left > 0 || motor_right > 0) {
-        digitalWrite(ledPin, HIGH);
-    } else {
-        digitalWrite(ledPin, LOW);
+// Drive the onboard NeoPixel (RGB_BUILTIN) at 50 Hz as the single LED
+// owner for both haptic audio and rumble. Priority: haptic audio wins
+// while it's actively arriving (last 200 ms), otherwise rumble takes
+// over, otherwise the LED is off. Doing this in loop() instead of in
+// OnVibrateEvent keeps NimBLE callbacks free of hardware writes (see
+// feedback_ble_callback_logging memory note) and keeps both paths
+// from fighting over the same LED.
+//
+// Color scheme:
+//   - Haptic audio active : blue, brightness scales with packet peak.
+//   - Rumble active       : red = motor_left strength, green = motor_right.
+//   - Silent              : off.
+//
+static uint32_t last_haptic_led_ms = 0;
+static bool     led_driving        = false;
+
+// Silence floor (out of 127) for haptic peaks. Below this we treat as
+// no-audio so the rumble path can take over the LED.
+static constexpr uint8_t HAPTIC_LED_SILENCE = 0;
+
+// Onboard-NeoPixel channel-order correction. Some ESP32 dev boards wire the
+// built-in WS2812 as RGB while the core's rgbLedWrite() emits GRB (or the
+// reverse), which swaps the red and green channels while leaving blue correct.
+// Empirically this board does that, so route every LED write through here in
+// (r, g, b) intent order and let the helper reorder. Set LED_SWAP_RG to 0 on a
+// board that doesn't need it.
+#define LED_SWAP_RG 1
+static inline void writeLED(uint8_t r, uint8_t g, uint8_t b)
+{
+#if LED_SWAP_RG
+    rgbLedWrite(RGB_BUILTIN, g, r, b);
+#else
+    rgbLedWrite(RGB_BUILTIN, r, g, b);
+#endif
+}
+
+static void updateLEDIfDue()
+{
+    uint32_t now = millis();
+    if (now - last_haptic_led_ms < 20) return;
+    last_haptic_led_ms = now;
+
+    // Priority 1: haptic audio (most recent activity wins).
+    bool haptic_active = (now - g_last_haptic_event_ms <= 200);
+    if (haptic_active) {
+        uint8_t peak = g_haptic_peak;
+        uint8_t r = 0, b = 0, g = 0;
+        if (peak >= HAPTIC_LED_SILENCE) {
+            // Two-phase ramp across blue then green:
+            // peak 0-64  -> blue  0..RGB_BRIGHTNESS, green = 0
+            // peak 64-127 -> blue = RGB_BRIGHTNESS, green 0..RGB_BRIGHTNESS
+            // if (peak <= 64) {
+            //     b = (uint8_t)map(peak, 0, 64, 0, RGB_BRIGHTNESS);
+            // } else {
+            //     b = RGB_BRIGHTNESS;
+            //     g = (uint8_t)map(peak, 64, 127, 0, RGB_BRIGHTNESS);
+            // }
+            int h = map(peak * 2, 0, 127, 0, 360);
+            int s = 100;
+            int v = 100;
+            HSVtoRGB(h, s, v, r, g, b);
+        }
+        writeLED(r, g, b);
+        led_driving = true;
+        return;
+    }
+
+    // Priority 2: rumble. Red = weak (left) motor, green = strong
+    // (right) motor. Gated on RUMBLE_FRESHNESS_MS so a host that quits
+    // mid-rumble (e.g. Unreal) doesn't strand the LED on the last colour.
+    bool rumble_fresh = (now - g_last_rumble_ms) < RUMBLE_FRESHNESS_MS;
+    if (rumble_fresh && (motor_left > 0 || motor_right > 0)) {
+        uint8_t r = (uint8_t)map(motor_left, 0, 255, 0, RGB_BRIGHTNESS);
+        uint8_t g = (uint8_t)map(motor_right, 0, 255, 0, RGB_BRIGHTNESS);
+        writeLED(r, g, 0);
+        led_driving = true;
+        return;
+    }
+
+    // Priority 3: last host-set lightbar colour. When neither haptic audio
+    // nor rumble is active, hold whatever colour the host (DSX) last picked
+    // instead of dropping to black. ledcolor[] is the raw 0-255 host RGB;
+    // scale to RGB_BRIGHTNESS so the NeoPixel matches the brightness of the
+    // haptic/rumble paths and doesn't blind at full 255.
+    if (ledcolor[0] || ledcolor[1] || ledcolor[2]) {
+        uint8_t r = (uint8_t)((uint16_t)ledcolor[0] * RGB_BRIGHTNESS / 255);
+        uint8_t g = (uint8_t)((uint16_t)ledcolor[1] * RGB_BRIGHTNESS / 255);
+        uint8_t b = (uint8_t)((uint16_t)ledcolor[2] * RGB_BRIGHTNESS / 255);
+        writeLED(r, g, b);
+        led_driving = true;
+        return;
+    }
+
+    // Priority 4: idle.
+    if (led_driving) {
+        writeLED(0, 0, 0);
+        led_driving = false;
+    }
+}
+
+// Print a one-line summary every 5 s, but only if new haptic events have
+// arrived since the last print. Keeps the serial console quiet for the
+// button-press testing flow when no haptic stream is active.
+static uint32_t last_haptic_stats_ms = 0;
+static uint32_t last_haptic_print_count = 0;
+static void emitHapticStatsIfDue()
+{
+    uint32_t now = millis();
+    if (now - last_haptic_stats_ms < 5000) return;
+    last_haptic_stats_ms = now;
+    uint32_t total = g_haptic_events;
+    if (total == last_haptic_print_count) return;
+    Serial.printf("[haptic] events=%u (delta=%u in 5s)\n",
+                  (unsigned)total,
+                  (unsigned)(total - last_haptic_print_count));
+    last_haptic_print_count = total;
+}
+
+// Execute a single numeric test command. Split out of loop() so the
+// comma-chain parser can call it per-token without duplicating the switch.
+void executeCommand(int selection)
+{
+    const float STEP = 0.05;
+    Serial.println(selection);
+
+    switch (selection) {
+        case 0: {
+            Serial.println("Pressing Cross");
+            dualsense->press(DUALSENSE_BUTTON_A);
+            delay(500);
+            dualsense->release(DUALSENSE_BUTTON_A);
+            break;
+        }
+        case 1: {
+            dualsense->press(DUALSENSE_BUTTON_B);
+            Serial.println("Pressing Circle");
+            delay(100);
+            dualsense->release(DUALSENSE_BUTTON_B);
+            break;
+        }
+        case 2: {
+            dualsense->press(DUALSENSE_BUTTON_X);
+            Serial.println("Pressing Square");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_X);
+            break;
+        }
+        case 3:
+            dualsense->press(DUALSENSE_BUTTON_Y);
+            Serial.println("Pressing Triangle");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_Y);
+            break;
+        case 4:
+            dualsense->press(DUALSENSE_BUTTON_LB);
+            Serial.println("Pressing L1");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_LB);
+            break;
+        case 5:
+            dualsense->press(DUALSENSE_BUTTON_RB);
+            Serial.println("Pressing R1");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_RB);
+            break;
+        case 6:
+            dualsense->press(DUALSENSE_BUTTON_LS);
+            Serial.println("Pressing L3");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_LS);
+            break;
+        case 7:
+            dualsense->press(DUALSENSE_BUTTON_RS);
+            Serial.println("Pressing R3");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_RS);
+            break;
+        case 8:
+            dualsense->press(DUALSENSE_BUTTON_SELECT);
+            Serial.println("Pressing Select");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_SELECT);
+            break;
+        case 9:
+            dualsense->press(DUALSENSE_BUTTON_START);
+            Serial.println("Pressing Start");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_START);
+            break;
+        case 10:
+            dualsense->press(DUALSENSE_BUTTON_MODE);
+            Serial.println("Pressing Home");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_MODE);
+            break;
+        case 11:
+            dualsense->press(DUALSENSE_BUTTON_MUTE);
+            Serial.println("Pressing Mute");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_MUTE);
+            break;
+        case 12:
+            dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NORTH);
+            Serial.println("Pressing DPAD UP");
+            delay(200);
+            dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NONE);
+            break;
+        case 13:
+            dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_EAST);
+            Serial.println("Pressing DPAD RIGHT");
+            delay(200);
+            dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NONE);
+            break;
+        case 14:
+            dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_WEST);
+            Serial.println("Pressing DPAD LEFT");
+            delay(200);
+            dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NONE);
+            break;
+        case 15:
+            dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_SOUTH);
+            Serial.println("Pressing DPAD DOWN");
+            delay(200);
+            dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NONE);
+            break;
+        case 16:
+            dualsense->setLeftTrigger(100);
+            Serial.println("Pressing L2");
+            delay(200);
+            dualsense->setLeftTrigger(0);
+            delay(200);
+            dualsense->press(DUALSENSE_BUTTON_LT);
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_LT);
+            break;
+        case 17:
+            dualsense->setRightTrigger(100);
+            Serial.println("Pressing R2");
+            delay(200);
+            dualsense->setRightTrigger(0);
+            delay(200);
+            dualsense->press(DUALSENSE_BUTTON_RT);
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_RT);
+            break;
+        case 18:
+            dualsense->setLeftThumb(-120, 0);
+            Serial.println("Moving left_analog left");
+            delay(200);
+            dualsense->setLeftThumb(0, 0);
+            break;
+        case 19:
+            dualsense->setLeftThumb(120, 0);
+            Serial.println("Moving left_analog Right");
+            delay(200);
+            dualsense->setLeftThumb(0, 0);
+            break;
+        case 20: {
+            dualsense->setLeftThumb(0, 120);
+            Serial.println("Moving left_analog down");
+            delay(200);
+            dualsense->setLeftThumb(0, 0);
+            break;
+        }
+        case 21: {
+            dualsense->setLeftThumb(0, -120);
+            Serial.println("Moving left_analog up");
+            delay(200);
+            dualsense->setLeftThumb(0, 0);
+            break;
+        }
+        case 22: {
+            dualsense->setRightThumb(-120, 0);
+            Serial.println("Moving right_analog left");
+            delay(200);
+            dualsense->setRightThumb(0, 0);
+            break;
+        }
+        case 23: {
+            dualsense->setRightThumb(120, 0);
+            Serial.println("Moving right_analog Right");
+            delay(200);
+            dualsense->setRightThumb(0, 0);
+            break;
+        }
+        case 24: {
+            dualsense->setRightThumb(0, 120);
+            Serial.println("Moving right_analog down");
+            delay(200);
+            dualsense->setRightThumb(0, 0);
+            break;
+        }
+        case 25: {
+            dualsense->setRightThumb(0, -120);
+            Serial.println("Moving right_analog up");
+            delay(200);
+            dualsense->setRightThumb(0, 0);
+            break;
+        }
+        case 26: {
+            Serial.println("Circle both joysticks");
+            for (float i = 0; i < TWO_PI; i += STEP) {
+                dualsense->setLeftThumb(cos(i) * 100, sin(i) * 100);
+                dualsense->setRightThumb(cos(i) * 100, -sin(i) * 100);
+                delay(15);
+            }
+            dualsense->setRightThumb(0, 0);
+            dualsense->setLeftThumb(0, 0);
+            break;
+        }
+        case 27: {
+            dualsense->press(DUALSENSE_BUTTON_L4);
+            Serial.println("Pressing L4");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_L4);
+            break;
+        }
+        case 28: {
+            dualsense->press(DUALSENSE_BUTTON_R4);
+            Serial.println("Pressing R4");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_R4);
+            break;
+        }
+        case 29: {
+            dualsense->press(DUALSENSE_BUTTON_L5);
+            Serial.println("Pressing L5");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_L5);
+            break;
+        }
+        case 30: {
+            dualsense->press(DUALSENSE_BUTTON_R5);
+            Serial.println("Pressing R5");
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_R5);
+            break;
+        }
+        case 31: {
+            Serial.println("sending gyro/accel movement");
+            for (float i = 0; i < TWO_PI; i += STEP) {
+                dualsense->setAccel(cos(i) * 300, sin(i) * 300, tan(i) * 300);
+                dualsense->setGyro(cos(i) * 400, sin(i) * 400, tan(i) * 400);
+                delay(5);
+            }
+            break;
+        }
+        case 32: {
+            Serial.println("Sending touchpad movement");
+            delay(200);
+            for (float i = 0; i < TWO_PI; i += STEP) {
+                dualsense->setLeftTouchpad(cos(i) * 400 + 1000, sin(i) * 400 + 540);
+                delay(15);
+            }
+            delay(20);
+            Serial.println("Sending touchpad click");
+            dualsense->press(DUALSENSE_BUTTON_TOUCHPAD);
+            delay(200);
+            dualsense->release(DUALSENSE_BUTTON_TOUCHPAD);
+            dualsense->releaseLeftTouchpad();
+            break;
+        }
+        case 33: {
+            auto dwell = [](uint32_t ms) {
+                uint32_t end = millis() + ms;
+                while (millis() < end) {
+                    dualsense->timestamp();
+                    dualsense->seq();
+                    delay(20);
+                }
+            };
+
+            dualsense->setChargingStatus(false);
+            for (int i = 100; i >= 0; i -= 25) {
+                dualsense->setBatteryLevel(i);
+                compositeHID.setBatteryLevel(i);
+                dwell(1000);
+            }
+            dualsense->setChargingStatus(true);
+            for (int i = 0; i <= 100; i += 25) {
+                dualsense->setBatteryLevel(i);
+                compositeHID.setBatteryLevel(i);
+                dwell(1000);
+            }
+            break;
+        }
+        default: {
+            Serial.println("Selection invalid");
+            Serial.println(selection);
+        }
     }
 }
 
@@ -253,6 +743,7 @@ void setup()
     // Attach event handlers (FunctionSlots are defined globally)
     dualsense->onReceivedOutputReport.attach(vibrationSlot);
     dualsense->onReceivedOutputReport.attach(ledSlot);
+    dualsense->onHapticAudioReceived.attach(hapticSlot);
 
     // Add all child devices to the top-level composite HID device to manage them
     compositeHID.addDevice(dualsense);
@@ -276,292 +767,51 @@ void setup()
 
 void loop()
 {
-    if (compositeHID.isConnected()) {
-        int selection = -1;
-        const float STEP = 0.05; // angle change per frame (speed)
+    updateLEDIfDue();
+    emitHapticStatsIfDue();
 
+    if (compositeHID.isConnected()) {
         dualsense->timestamp();
         dualsense->seq();
 
-        if(Serial.available() < 2) {
+        if (Serial.available() == 0) {
             dualsense->sendGamepadReport();
             delay(20);
             yield();
             return;
         }
-       
-        selection = Serial.parseInt();
-        Serial.println(selection);
 
-        switch (selection) {
-            case 0: {
-                Serial.println("Pressing Cross");
-                dualsense->press(DUALSENSE_BUTTON_A);
-                delay(500);
-                dualsense->release(DUALSENSE_BUTTON_A);
-                break;
-            }
-            case 1: {
-                dualsense->press(DUALSENSE_BUTTON_B);
-                Serial.println("Pressing Circle");
-                delay(100);
-                dualsense->release(DUALSENSE_BUTTON_B);
-                break;
-            }
-            case 2: {
-                dualsense->press(DUALSENSE_BUTTON_X);
-                Serial.println("Pressing Square");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_X);
-                break;
-            }
-            case 3:
-                dualsense->press(DUALSENSE_BUTTON_Y);
-                Serial.println("Pressing Triangle");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_Y);
-                break;
-            case 4:
-                dualsense->press(DUALSENSE_BUTTON_LB);
-                Serial.println("Pressing L1");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_LB);
-                break;
-            case 5:
-                dualsense->press(DUALSENSE_BUTTON_RB);
-                Serial.println("Pressing R1");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_RB);
-                break;
-            case 6:
-                dualsense->press(DUALSENSE_BUTTON_LS);
-                Serial.println("Pressing L3");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_LS);
-                break;
-            case 7:
-                dualsense->press(DUALSENSE_BUTTON_RS);
-                Serial.println("Pressing R3");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_RS);
-                break;
-            case 8:
-                dualsense->press(DUALSENSE_BUTTON_SELECT);
-                Serial.println("Pressing Select");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_SELECT);
-                break;
-            case 9:
-                dualsense->press(DUALSENSE_BUTTON_START);
-                Serial.println("Pressing Start");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_START);
-                break;
-            case 10:
-                dualsense->press(DUALSENSE_BUTTON_MODE);
-                Serial.println("Pressing Home");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_MODE);
-                break;
-            case 11:
-                dualsense->press(DUALSENSE_BUTTON_MUTE);
-                Serial.println("Pressing Mute");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_MUTE);
-                break;
-            case 12:
-                dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NORTH);
-                Serial.println("Pressing DPAD UP");
-                delay(200);
-                dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NONE);
-                break;
-            case 13:
-                dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_EAST);
-                Serial.println("Pressing DPAD RIGHT");
-                delay(200);
-                dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NONE);
-                break;
-            case 14:
-                dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_WEST);
-                Serial.println("Pressing DPAD LEFT");
-                delay(200);
-                dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NONE);
-                break;
-            case 15:
-                dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_SOUTH);
-                Serial.println("Pressing DPAD DOWN");
-                delay(200);
-                dualsense->pressDPadDirection(DUALSENSE_BUTTON_DPAD_NONE);
-                break;
-            case 16:
-                dualsense->setLeftTrigger(100);
-                Serial.println("Pressing L2");
-                delay(200);
-                dualsense->setLeftTrigger(0);
-                delay(200);
-                dualsense->press(DUALSENSE_BUTTON_LT);
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_LT);
-                break;
-            case 17:
-                dualsense->setRightTrigger(100);
-                Serial.println("Pressing R2");
-                delay(200);
-                dualsense->setRightTrigger(0);
-                delay(200);
-                dualsense->press(DUALSENSE_BUTTON_RT);
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_RT);
-                break;
-            case 18:
-                dualsense->setLeftThumb(-120, 0);
-                Serial.println("Moving left_analog left");
-                delay(200);
-                dualsense->setLeftThumb(0, 0);
-                break;
-            case 19:
-                dualsense->setLeftThumb(120, 0);
-                Serial.println("Moving left_analog Right");
-                delay(200);
-                dualsense->setLeftThumb(0, 0);
-                break;
-            case 20: {
-                dualsense->setLeftThumb(0, 120);
-                Serial.println("Moving left_analog down");
-                delay(200);
-                dualsense->setLeftThumb(0, 0);
-                break;
-            }
-            case 21: {
-                dualsense->setLeftThumb(0, -120);
-                Serial.println("Moving left_analog up");
-                delay(200);
-                dualsense->setLeftThumb(0, 0);
-                break;
-            }
-            case 22: {
-                dualsense->setRightThumb(-120, 0);
-                Serial.println("Moving right_analog left");
-                delay(200);
-                dualsense->setRightThumb(0, 0);
-                break;
-            }
-            case 23: {
-                dualsense->setRightThumb(120, 0);
-                Serial.println("Moving right_analog Right");
-                delay(200);
-                dualsense->setRightThumb(0, 0);
-                break;
-            }
-            case 24: {
-                dualsense->setRightThumb(0, 120);
-                Serial.println("Moving right_analog down");
-                delay(200);
-                dualsense->setRightThumb(0, 0);
-                break;
-            }
-            case 25: {
-                dualsense->setRightThumb(0, -120);
-                Serial.println("Moving right_analog up");
-                delay(200);
-                dualsense->setRightThumb(0, 0);
-                break;
-            }
-            case 26: {
-                Serial.println("Circle both joysticks");
-                for (float i = 0; i < TWO_PI; i += STEP) {
-                    dualsense->setLeftThumb(cos(i) * 100, sin(i) * 100);
-                    dualsense->setRightThumb(cos(i) * 100, -sin(i) * 100);
-                    delay(15);
-                }
-                dualsense->setRightThumb(0, 0);
-                dualsense->setLeftThumb(0, 0);
-                break;
-            }
-            case 27: {
-                dualsense->press(DUALSENSE_BUTTON_L4);
-                Serial.println("Pressing L4");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_L4);
-                break;
-            }
-            case 28: {
-                dualsense->press(DUALSENSE_BUTTON_R4);
-                Serial.println("Pressing R4");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_R4);
-                break;
-            }
-            case 29: {
-                dualsense->press(DUALSENSE_BUTTON_L5);
-                Serial.println("Pressing L5");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_L5);
-                break;
-            }
-            case 30: {
-                dualsense->press(DUALSENSE_BUTTON_R5);
-                Serial.println("Pressing R5");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_R5);
-                break;
-            }
-            case 31: {
-                Serial.println("sending gyro/accel movement");
-                for (float i = 0; i < TWO_PI; i += STEP) {
-                    dualsense->setAccel(cos(i) * 300, sin(i) * 300, tan(i) * 300);
-                    dualsense->setGyro(cos(i) * 400, sin(i) * 400, tan(i) * 400);
-                    delay(5);
-                }
-                break;
-            }
-            case 32: {
-                Serial.println("Sending touchpad movement");
-                delay(200);
-                for (float i = 0; i < TWO_PI; i += STEP) {
-                    dualsense->setLeftTouchpad(cos(i) * 400 + 1000, sin(i) * 400 + 540);
-                    delay(15);
-                }
-                delay(20);
-                Serial.println("Sending touchpad click");
-                dualsense->press(DUALSENSE_BUTTON_TOUCHPAD);
-                Serial.println("Pressing R5");
-                delay(200);
-                dualsense->release(DUALSENSE_BUTTON_TOUCHPAD);
-                dualsense->releaseLeftTouchpad();
-                break;
-            }
-            case 33: {
-                // DualSense controllers can send battery info through the input report as well as through the BLE device.
-                // Pump seq()/timestamp() during each dwell so reports don't carry stale sequence numbers that hosts
-                // (DSX/Windows) may dedupe and drop.
-                auto dwell = [&](uint32_t ms) {
-                    uint32_t end = millis() + ms;
-                    while (millis() < end) {
-                        dualsense->timestamp();
-                        dualsense->seq();
-                        delay(20);
-                    }
-                };
+        // Read a full line and execute each comma-separated token in order.
+        // Tokens of only 'd'/'D' characters are delays: each 'd' = 100 ms.
+        // All other tokens are parsed as integers and dispatched as commands.
+        // Example: "0,dd,26,2" → Cross, 200 ms delay, circle sticks, Square.
+        String line = Serial.readStringUntil('\n');
+        line.trim();
 
-                dualsense->setChargingStatus(false);
-                for (int i = 100; i >= 0; i -= 25) {
-                    dualsense->setBatteryLevel(i);
-                    compositeHID.setBatteryLevel(i);
-                    dwell(1000);
+        int tokenStart = 0;
+        while (tokenStart <= (int)line.length()) {
+            int comma = line.indexOf(',', tokenStart);
+            String token = (comma < 0) ? line.substring(tokenStart)
+                                       : line.substring(tokenStart, comma);
+            token.trim();
+
+            if (token.length() > 0) {
+                bool isDelay = true;
+                for (unsigned int i = 0; i < token.length(); i++) {
+                    if (token[i] != 'd' && token[i] != 'D') { isDelay = false; break; }
                 }
-                dualsense->setChargingStatus(true);
-                for (int i = 0; i <= 100; i += 25) {
-                    dualsense->setBatteryLevel(i);
-                    compositeHID.setBatteryLevel(i);
-                    dwell(1000);
+
+                if (isDelay) {
+                    uint32_t ms = token.length() * 100;
+                    Serial.println("Delay " + String(ms) + "ms");
+                    delay(ms);
+                } else {
+                    executeCommand(token.toInt());
                 }
-                break;
             }
-            default: {
-                Serial.println("Selection invalid");
-                Serial.println(selection);
-            }
+
+            if (comma < 0) break;
+            tokenStart = comma + 1;
         }
     } else {
         Serial.println("disconnected");
