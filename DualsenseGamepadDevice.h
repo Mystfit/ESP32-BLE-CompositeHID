@@ -617,6 +617,15 @@ struct DualsenseGamepadOutputReportData {
         //   params[9] != 0  → DS_TRIGGER_SUBTYPE_VIBRATION            (freq at params[9])
         //   params[9] == 0  → DS_TRIGGER_SUBTYPE_MULTIPLE_POSITION_VIBRATION (freq at params[8])
         static DsTriggerEffectSubtype classifySubtype(uint8_t mode, const uint8_t* params) {
+            // Two "off" encodings exist in the wild: native DSX/firmware sends
+            // 0x05 (DsTriggerMode::Off); DSX's "Dualsense emulation" mode sends a
+            // fully-zeroed trigger block (mode 0x00 + zero params) while still
+            // raising the valid-flag bits. Treat the zero block as off too, else
+            // it falls through to UNKNOWN and logs as unknown(0x0,...). Verified
+            // by raw capture: both forms ride an identical 141-byte 0x31 report.
+            if (mode == 0x00)
+                return DS_TRIGGER_SUBTYPE_OFF;
+
             switch (static_cast<DsTriggerMode>(mode)) {
                 case DsTriggerMode::Off:
                     return DS_TRIGGER_SUBTYPE_OFF;
@@ -808,14 +817,17 @@ struct DualsenseGamepadOutputReportData {
 
     // parsing function - reads from raw BLE output report bytes
     // Handles multiple formats:
+    // - 398 bytes: report 0x36 (haptic-audio sub-protocol) - recent Unreal-Dualsense
     // - 142 bytes: report 0x32 (haptic-audio sub-protocol) - SAxense / soundsense
+    // - 141 bytes: extended DSX-over-BLE report (3-byte header + common, offset 3)
     // - 78 bytes: Full BLE report (report_id=0x31 + seq_tag + tag + common)
-    // - 77 bytes: USB-over-BLE (seq + common) - DSX sends this format
+    // - 77 bytes: USB-over-BLE (seq + common) - older DSX sends this format
     //            OR BLE report with report_id stripped (seq_tag + tag + common)
     // - 63 bytes: USB report (report_id=0x02 + common)
     // - 62 bytes: USB report with report_id stripped (common only)
     //
-    // DSX 77-byte format: [seq 0x00-0x0F] [valid_flag0] [valid_flag1] [motor_r] [motor_l] ...
+    // DSX 77-byte format:  [seq 0x00-0x0F] [valid_flag0] [valid_flag1] [motor_r] [motor_l] ...
+    // DSX 141-byte format: [seq] [..] [tag] [valid_flag0] [valid_flag1] [motor_r] [motor_l] ...
     bool load(const uint8_t* value, size_t size)
     {
         if (!value) return false;
@@ -855,6 +867,21 @@ struct DualsenseGamepadOutputReportData {
                 // 77-byte BLE report (report_id present but one byte short)
                 report_id = value[0];
                 seq_tag = value[1];
+                tag = value[2];
+                common_offset = 3;
+            } else if (size >= 79) {
+                // Extended DSX-over-BLE report (empirically 141 bytes on current
+                // DSX/Windows). Larger than the 78-byte standard BLE report and
+                // not a 0x32/0x36 haptic report (those return early above). The
+                // layout is a 3-byte header [seq][..][tag] followed by the
+                // standard 47-byte common section: lightbar RGB, trigger-effect,
+                // and valid-flag fields only line up at offset 3 (verified by raw
+                // capture — RGB at value[47..49], trigger modes 0x05 at value
+                // [13]/[24]). The smaller USB-over-BLE form (<=78 B) keeps the
+                // offset-1 handling below. Must precede the value[0]<=0x0F check
+                // because this report's seq byte is sometimes small (e.g. 0x00).
+                report_id = 0x31;   // logically a 0x31-family report
+                seq_tag = value[0];
                 tag = value[2];
                 common_offset = 3;
             } else if (value[1] == 0x10) {
