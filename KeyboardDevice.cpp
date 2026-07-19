@@ -102,6 +102,14 @@ void KeyboardDevice::modifierKeyPress(uint8_t modifier)
     }
 }
 
+void KeyboardDevice::modifierKeyPressRelease(uint8_t modifier)
+{
+    modifierKeyPress(modifier);     // Key pressed
+    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Keep pressed
+    modifierKeyRelease(modifier);   // Key released
+}
+
+
 void KeyboardDevice::modifierKeyRelease(uint8_t modifier)
 {
     {
@@ -127,6 +135,16 @@ void KeyboardDevice::mediaKeyPress(uint32_t mediaKey)
         sendMediaKeyReport();
     }
 }
+
+void KeyboardDevice::mediaKeyPressRelease(uint32_t mediaKey)
+{
+    mediaKeyPress(mediaKey);     // Key pressed
+    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Keep pressed
+    mediaKeyRelease(mediaKey);   // Key released
+}
+
+
+
 
 void KeyboardDevice::mediaKeyRelease(uint32_t mediaKey)
 {
@@ -184,6 +202,13 @@ void KeyboardDevice::keyRelease(uint8_t keyCode)
     {
         sendKeyReport();
     }
+}
+
+void KeyboardDevice::keyPressRelease(uint8_t keyCode)
+{
+    keyPress(keyCode);     // Key pressed
+    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Keep pressed
+    keyRelease(keyCode);   // Key released
 }
 
 void KeyboardDevice::sendKeyReport(bool defer)

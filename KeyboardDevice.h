@@ -74,10 +74,13 @@ public:
 
     void keyPress(uint8_t keyCode);
     void keyRelease(uint8_t keyCode);
+    void keyPressRelease(uint8_t keyCode);
     void modifierKeyPress(uint8_t modifier);
     void modifierKeyRelease(uint8_t modifier);
+    void modifierKeyPressRelease(uint8_t modifier);
     void mediaKeyPress(uint32_t mediaKey);
     void mediaKeyRelease(uint32_t mediaKey);
+    void mediaKeyPressRelease(uint32_t mediaKey);
 
     Signal<KeyboardOutputReport> onLED;
 
